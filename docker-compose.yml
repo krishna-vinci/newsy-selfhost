@@ -1,0 +1,23 @@
+services:
+  fastapi:
+    build: .
+    ports:
+      - "100.66.97.99:8666:8666"
+    environment:
+      - DATABASE_URL=postgresql://krishna:1122@db:5432/youtube_cm
+      - PIXABAY_API_KEY=49326456-41725d5dc7f4b0f0e4f587cc9
+      - RSSBRIDGE_HOST=https://rssbridge.krishna.quest
+      - METUBE_URL=https://metube.krishna.quest
+      - NITTER_URL=https://nitter.space
+      - PROJECTS_ROOT=/app/data/youtube-videos
+      - DAILY_REPORT_DIR=/app/data/daily_report
+    volumes:
+      - /mnt/youtube-cm/youtube-data:/app/data
+      - .:/app
+    restart: unless-stopped
+    networks:
+      - db-net
+
+networks:
+  db-net:
+    external: true  # Make sure this is already created: docker network create db-net

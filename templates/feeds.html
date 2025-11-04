@@ -1,0 +1,478 @@
+{% extends "base.html" %}
+{% block title %}Feeds - News{% endblock %}
+{% block content %}
+<!-- Header: Title with Category Dropdown on left; View Buttons on right -->
+<div class="flex items-center justify-between mb-4">
+  <div class="flex items-center space-x-2">
+    <h1 class="text-3xl font-bold">News Feeds</h1>
+    <!-- Category Dropdown -->
+    <select id="category-select" class="select select-bordered select-sm" onchange="filterByCategory()">
+      <option value="All">All Categories</option>
+      {% for cat in categories %}
+        <option value="{{ cat.category }}">{{ cat.category }}</option>
+      {% endfor %}
+    </select>
+    <!-- Report Controls (Timeframe and Generate Report) -->
+    <div class="flex items-center space-x-2 ml-4">
+      <select id="timeframe-select" class="select select-bordered select-sm">
+        <option value="last24">Last 24 Hours</option>
+        <option value="yesterday">Yesterday</option>
+        <option value="week">Last Week</option>
+      </select>
+      <button id="generate-report" class="btn btn-primary btn-sm" onclick="generateReport()">Generate Report</button>
+    </div>
+  </div>
+  <div class="flex items-center space-x-2">
+    <button id="btn-card" class="btn btn-outline btn-sm" onclick="showCardView()">CARD VIEW</button>
+    <button id="btn-headline" class="btn btn-outline btn-sm" onclick="showHeadlineView()">HEADLINE VIEW</button>
+    <button id="btn-column" class="btn btn-outline btn-sm" onclick="showColumnView()">COLUMN VIEW</button>
+  </div>
+</div>
+
+<!-- Notification for Report Generation -->
+<div id="report-status" class="mb-4"></div>
+
+<!-- Toast Container for ephemeral "copied" messages -->
+<div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
+
+<!-- CARD VIEW (default visible) -->
+<div id="card-view">
+  {% for cat in categories %}
+  <section class="category-section mb-10" data-category="{{ cat.category }}">
+    <h2 class="text-2xl font-semibold mb-4">{{ cat.category }}</h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      {% for item in cat.feed_items %}
+      <div class="card w-full h-full bg-base-100 shadow-xl">
+        <!-- Thumbnail -->
+        <figure class="h-48">
+          <img src="{{ item.thumbnail }}" alt="Article Thumbnail" class="w-full h-full object-cover">
+        </figure>
+        <!-- Card Body -->
+        <div class="card-body flex flex-col">
+          <h2 class="card-title">
+            <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="hover:underline">
+              {{ item.title }}
+            </a>
+          </h2>
+          <p class="text-sm text-gray-500 mb-2">
+            {{ item.published }} • <span class="font-semibold">{{ item.source }}</span>
+          </p>
+          
+          <p class="line-clamp-3 mb-4 text-sm">{{ item.description|truncate_words(500)|safe }}</p>
+
+          <!-- Icon Buttons -->
+          <div class="mt-auto flex items-center justify-end space-x-2">
+            <!-- Copy Link -->
+            <button class="btn btn-sm btn-square" onclick="copyToClipboard('{{ item.link }}')" title="Copy Link">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M8 2H16C17.1046 2 18 2.8954 18 4V6C18 7.1046 17.1046 8 16 8H8C6.8954 8 6 7.1046 6 6V4C6 2.8954 6.8954 2 8 2ZM8 8H16V20C16 21.1046 15.1046 22 14 22H10C8.8954 22 8 21.1046 8 20V8Z" />
+              </svg>
+            </button>
+            <!-- Save to Project -->
+            <button class="btn btn-sm btn-square" onclick='openSaveToProjectModal({{ item.title|tojson }}, {{ item.link|tojson }}, {{ item.published|tojson }}, {{ item.description|tojson }})' title="Save to Project">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+              </svg>
+            </button>
+            <!-- Read More (Modal Trigger) -->
+            <label for="modal-card-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="btn btn-sm btn-square modal-button" title="Read More"
+                   onclick="loadFullArticle('{{ item.link }}', 'card-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}')">
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              </svg>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal for Card View -->
+      <input type="checkbox" id="modal-card-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="modal-toggle" />
+      <label for="modal-card-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="modal cursor-pointer">
+        <label class="modal-box relative w-full max-w-2xl max-h-[50vh] overflow-y-auto" for="">
+          <label for="modal-card-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="btn btn-sm btn-circle absolute right-2 top-2">✕</label>
+          <h3 class="font-bold text-lg mb-4">
+            <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="hover:underline">
+              {{ item.title }}
+            </a>
+          </h3>
+          <div id="modal-content-card-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="text-sm leading-6">
+            <p>Loading...</p>
+          </div>
+        </label>
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+
+<!-- HEADLINE VIEW -->
+<div id="headline-view" class="hidden">
+  {% for cat in categories %}
+  <section class="category-section mb-10" data-category="{{ cat.category }}">
+    <h2 class="text-2xl font-semibold mb-4">{{ cat.category }}</h2>
+    <div class="divide-y divide-gray-200">
+      {% for item in cat.feed_items %}
+      <div class="py-2 flex items-center justify-between">
+        <div>
+          <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="font-medium hover:underline">
+            {{ item.title }}
+          </a>
+          <span class="text-xs text-gray-500 ml-2">{{ item.published }}</span>
+        </div>
+        <div class="flex items-center space-x-2">
+          <!-- Copy Link -->
+          <button class="btn btn-sm btn-square" onclick="copyToClipboard('{{ item.link }}')" title="Copy Link">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M8 2H16C17.1046 2 18 2.8954 18 4V6C18 7.1046 17.1046 8 16 8H8C6.8954 8 6 7.1046 6 6V4C6 2.8954 6.8954 2 8 2ZM8 8H16V20C16 21.1046 15.1046 22 14 22H10C8.8954 22 8 21.1046 8 20V8Z" />
+            </svg>
+          </button>
+          <!-- Save to Project -->
+          <button class="btn btn-xs btn-square" onclick='openSaveToProjectModal({{ item.title|tojson }}, {{ item.link|tojson }}, {{ item.published|tojson }}, {{ item.description|tojson }})' title="Save to Project">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+            </svg>
+          </button>
+          <!-- Read More -->
+          <label for="modal-headline-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="btn btn-xs btn-square modal-button" title="Read More"
+                 onclick="loadFullArticle('{{ item.link }}', 'headline-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}')">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+          </label>
+        </div>
+      </div>
+
+      <!-- Modal for Headline View -->
+      <input type="checkbox" id="modal-headline-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="modal-toggle" />
+      <label for="modal-headline-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="modal cursor-pointer">
+        <label class="modal-box relative w-full max-w-2xl max-h-[50vh] overflow-y-auto" for="">
+          <label for="modal-headline-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="btn btn-sm btn-circle absolute right-2 top-2">✕</label>
+          <h3 class="font-bold text-lg mb-4">
+            <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="hover:underline">
+              {{ item.title }}
+            </a>
+          </h3>
+          <div id="modal-content-headline-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="text-sm leading-6">
+            <p>Loading...</p>
+          </div>
+        </label>
+      </label>
+      {% endfor %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+
+<!-- COLUMN (SPLIT) VIEW -->
+<div id="column-view" class="hidden h-screen flex flex-col">
+  <div class="flex flex-grow overflow-hidden">
+    <!-- Left Column: Article List -->
+    <div id="article-list" class="w-1/3 border-r overflow-y-auto p-2 sm:p-3 md:p-4 bg-base-200">
+      {% for cat in categories %}
+      <div class="category-section mb-6" data-category="{{ cat.category }}">
+        <h3 class="text-lg font-semibold mb-2">{{ cat.category }}</h3>
+        <ul class="space-y-1">
+          {% for item in cat.feed_items %}
+          <li class="article-item cursor-pointer py-2 px-2 rounded hover:bg-gray-100 flex justify-between items-center"
+              data-url="{{ item.link }}"
+              onclick="handleRowClick(event, '{{ item.link }}', this)">
+            <div class="flex flex-col">
+              <span class="font-medium">
+                <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="hover:underline text-blue-400" onclick="event.stopPropagation()">
+                  {{ item.title }}
+                </a>
+              </span>
+              <span class="text-xs text-gray-500 mt-1">{{ item.published }}</span>
+            </div>
+            <div class="flex space-x-1 ml-2">
+              <!-- Copy Link -->
+              <button class="btn btn-xs btn-square" onclick="event.stopPropagation(); copyToClipboard('{{ item.link }}')" title="Copy Link">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M8 2H16C17.1046 2 18 2.8954 18 4V6C18 7.1046 17.1046 8 16 8H8C6.8954 8 6 7.1046 6 6V4C6 2.8954 6.8954 2 8 2ZM8 8H16V20C16 21.1046 15.1046 22 14 22H10C8.8954 22 8 21.1046 8 20V8Z" />
+                </svg>
+              </button>
+              <!-- Save to Project -->
+              <button class="btn btn-xs btn-square" onclick='openSaveToProjectModal({{ item.title|tojson }}, {{ item.link|tojson }}, {{ item.published|tojson }}, {{ item.description|tojson }})' title="Save to Project">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" />
+                </svg>
+              </button>
+              <!-- Read More -->
+              <button class="btn btn-xs btn-square" onclick="event.stopPropagation(); loadArticleHtml('{{ item.link }}', this)" title="Read More">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+              </button>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endfor %}
+    </div>
+    <!-- Right Column: Detailed Article View -->
+    <div id="article-detail" class="w-2/3 p-2 sm:p-3 md:p-4 overflow-y-auto">
+      <div id="detail-content" class="prose max-w-none text-sm text-gray-800">
+        <p class="text-gray-600">Select an article from the list to read its full content.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Save to Project Modal -->
+<input type="checkbox" id="saveToProjectModal" class="modal-toggle" />
+<label for="saveToProjectModal" class="modal cursor-pointer">
+  <label class="modal-box relative" for="">
+    <h3 class="font-bold text-lg mb-4">Save Article to Project</h3>
+    <form id="saveToProjectForm" onsubmit="submitSaveToProject(event)">
+      <!-- Hidden fields for article data -->
+      <input type="hidden" id="articleTitle" name="title">
+      <input type="hidden" id="articleLink" name="link">
+      <input type="hidden" id="articlePublished" name="published">
+      <input type="hidden" id="articleDescription" name="description">
+      <!-- Category Dropdown with onchange to fetch project names -->
+      <label for="saveCategory" class="label">Category</label>
+      <select id="saveCategory" name="category" class="select select-bordered mb-4" required onchange="fetchProjectNames()">
+        {% for cat in predefined_categories %}
+          <option value="{{ cat }}">{{ cat }}</option>
+        {% endfor %}
+      </select>
+      <!-- Project Name Input with datalist for autocomplete -->
+      <label for="saveProject" class="label">Project Name</label>
+      <input type="text" id="saveProject" name="project" class="input input-bordered mb-4" placeholder="Enter project name" list="projectSuggestions" required>
+      <datalist id="projectSuggestions">
+        <!-- Options will be added dynamically -->
+      </datalist>
+      <div class="modal-action">
+        <button type="submit" class="btn btn-primary">Save</button>
+        <label for="saveToProjectModal" class="btn">Cancel</label>
+      </div>
+    </form>
+  </label>
+</label>
+
+<!-- SCRIPTS -->
+<script>
+  // Report Generation Function
+  function generateReport() {
+    const timeframe = document.getElementById("timeframe-select").value;
+    fetch(`/daily-report-md?timeframe=${encodeURIComponent(timeframe)}`)
+      .then(response => response.json())
+      .then(data => {
+        if(data.status === "success") {
+          // Show a temporary notification at the top
+          const reportStatus = document.getElementById("report-status");
+          reportStatus.innerHTML = `<div class="alert alert-success">Report generated: ${data.file}</div>`;
+          setTimeout(() => { reportStatus.innerHTML = ""; }, 3000);
+        } else {
+          document.getElementById("report-status").innerHTML = `<div class="alert alert-error">${data.error || 'Error generating report.'}</div>`;
+          setTimeout(() => { document.getElementById("report-status").innerHTML = ""; }, 3000);
+        }
+      })
+      .catch(err => {
+        console.error('Error generating report:', err);
+        document.getElementById("report-status").innerHTML = `<div class="alert alert-error">Error generating report.</div>`;
+        setTimeout(() => { document.getElementById("report-status").innerHTML = ""; }, 3000);
+      });
+  }
+
+  // Show/Hide Views
+  function showCardView() {
+    document.getElementById('card-view').classList.remove('hidden');
+    document.getElementById('headline-view').classList.add('hidden');
+    document.getElementById('column-view').classList.add('hidden');
+  }
+  function showHeadlineView() {
+    document.getElementById('card-view').classList.add('hidden');
+    document.getElementById('headline-view').classList.remove('hidden');
+    document.getElementById('column-view').classList.add('hidden');
+  }
+  function showColumnView() {
+    document.getElementById('card-view').classList.add('hidden');
+    document.getElementById('headline-view').classList.add('hidden');
+    document.getElementById('column-view').classList.remove('hidden');
+  }
+
+  // Filter by Category
+  function filterByCategory() {
+    const selected = document.getElementById('category-select').value;
+    const sections = document.querySelectorAll('.category-section');
+    sections.forEach(section => {
+      if (selected === "All" || section.getAttribute('data-category') === selected) {
+        section.style.display = "";
+      } else {
+        section.style.display = "none";
+      }
+    });
+  }
+
+  // Toast Notification
+  function showToast(message) {
+    const toastContainer = document.getElementById("toast-container");
+    if (!toastContainer) return;
+    const toast = document.createElement("div");
+    toast.className = "alert alert-success shadow-lg animate-fadeInOut";
+    toast.innerHTML = `<span>${message}</span>`;
+    toastContainer.appendChild(toast);
+    setTimeout(() => { toast.remove(); }, 2000);
+  }
+
+  // Copy Link
+  function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      showToast("Link copied!");
+    }).catch(err => {
+      console.error('Error copying text: ', err);
+    });
+  }
+
+  // Load Full Article for Card/Headline (use HTML formatting)
+  async function loadFullArticle(articleUrl, modalId) {
+    const modalContent = document.getElementById('modal-content-' + modalId);
+    modalContent.innerHTML = "<p>Loading...</p>";
+    try {
+      const response = await fetch(`/article-full-text?url=${encodeURIComponent(articleUrl)}`);
+      const data = await response.json();
+      if (data.content) {
+        modalContent.innerHTML = data.content;
+      } else if (data.error) {
+        modalContent.innerHTML = `<p class="text-red-500">Error: ${data.error}</p>`;
+      } else {
+        modalContent.innerHTML = "<p class='text-red-500'>No content found.</p>";
+      }
+    } catch (err) {
+      console.error(err);
+      modalContent.innerHTML = "<p class='text-red-500'>Failed to load article content.</p>";
+    }
+  }
+
+  // Column View: Clicking row loads HTML
+  function handleRowClick(event, articleUrl, rowEl) {
+    loadArticleHtml(articleUrl, rowEl);
+    highlightRow(rowEl);
+  }
+
+  // Column View: Highlight selected row
+  function highlightRow(selectedEl) {
+    const articleItems = document.querySelectorAll('.article-item');
+    articleItems.forEach(item => {
+      item.classList.remove('bg-blue-100');
+    });
+    selectedEl.classList.add('bg-blue-100');
+  }
+
+  // Column View: Load HTML-Formatted Article
+  async function loadArticleHtml(articleUrl, triggerElement) {
+    const detailContainer = document.getElementById('detail-content');
+    detailContainer.innerHTML = "<p>Loading article...</p>";
+    try {
+      const response = await fetch(`/article-full-text?url=${encodeURIComponent(articleUrl)}`);
+      const data = await response.json();
+      if (data.content) {
+        detailContainer.innerHTML = data.content;
+      } else if (data.error) {
+        detailContainer.innerHTML = `<p class="text-red-500">Error: ${data.error}</p>`;
+      } else {
+        detailContainer.innerHTML = "<p class='text-red-500'>No content found.</p>";
+      }
+    } catch (err) {
+      console.error(err);
+      detailContainer.innerHTML = "<p class='text-red-500'>Failed to load article.</p>";
+    }
+  }
+
+  // Column View: Keyboard Navigation
+  let articleItems = document.querySelectorAll('.article-item');
+  let currentIndex = 0;
+  document.addEventListener('keydown', (e) => {
+    if (document.activeElement.tagName.toLowerCase() === 'input') return;
+    if (e.key === "ArrowDown") {
+      if (currentIndex < articleItems.length - 1) {
+        currentIndex++;
+        highlightRow(articleItems[currentIndex]);
+        loadArticleHtml(articleItems[currentIndex].getAttribute('data-url'), articleItems[currentIndex]);
+      }
+    } else if (e.key === "ArrowUp") {
+      if (currentIndex > 0) {
+        currentIndex--;
+        highlightRow(articleItems[currentIndex]);
+        loadArticleHtml(articleItems[currentIndex].getAttribute('data-url'), articleItems[currentIndex]);
+      }
+    }
+  });
+
+  // Save to Project Functions
+  function openSaveToProjectModal(title, link, published, description) {
+    console.log("openSaveToProjectModal called with:", title, link, published, description);
+    document.getElementById("articleTitle").value = title;
+    document.getElementById("articleLink").value = link;
+    document.getElementById("articlePublished").value = published;
+    document.getElementById("articleDescription").value = description;
+    document.getElementById("saveToProjectModal").checked = true;
+    fetchProjectNames(); // fetch suggestions when modal opens
+  }
+
+  async function submitSaveToProject(event) {
+    event.preventDefault();
+    const formData = new FormData(document.getElementById("saveToProjectForm"));
+    try {
+      const response = await fetch("/api/add_to_project", {
+        method: "POST",
+        body: formData
+      });
+      const result = await response.json();
+      if(result.status === "success") {
+        alert("Article saved to project!");
+        document.getElementById("saveToProjectModal").checked = false;
+      } else {
+        alert("Error: " + result.error);
+      }
+    } catch (error) {
+      alert("Error saving article: " + error);
+    }
+  }
+
+  // Fetch project names for selected category and update the datalist for project autocomplete
+  async function fetchProjectNames() {
+    const category = document.getElementById("saveCategory").value;
+    try {
+      const response = await fetch(`/api/project_names?category=${encodeURIComponent(category)}`);
+      const data = await response.json();
+      const datalist = document.getElementById("projectSuggestions");
+      datalist.innerHTML = ""; // Clear previous suggestions
+      data.projects.forEach(proj => {
+        const option = document.createElement("option");
+        option.value = proj;
+        datalist.appendChild(option);
+      });
+    } catch (error) {
+      console.error("Error fetching project names:", error);
+    }
+  }
+</script>
+
+<!-- Minimal CSS animation for toast and paragraph spacing in .prose -->
+<style>
+  @keyframes fadeInOut {
+    0%   { opacity: 0; transform: translateY(-10px); }
+    10%  { opacity: 1; transform: translateY(0); }
+    90%  { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(-10px); }
+  }
+  .animate-fadeInOut {
+    animation: fadeInOut 2s ease-in-out forwards;
+  }
+  .prose p {
+    margin: 0.5em 0;
+  }
+</style>
+{% endblock %}
