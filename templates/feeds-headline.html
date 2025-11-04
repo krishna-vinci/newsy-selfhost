@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}Feeds - Headlines{% endblock %}
+{% block content %}
+<h1 class="text-3xl font-bold mb-6">News Headlines</h1>
+
+<!-- Toast container for ephemeral "copied" messages -->
+<div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
+
+{% for cat in categories %}
+  <section class="mb-10">
+    <h2 class="text-2xl font-semibold mb-4">{{ cat.category }}</h2>
+    <div class="divide-y divide-gray-200">
+      {% for item in cat.feed_items %}
+        <div class="py-2 flex items-center justify-between">
+          <div>
+            <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer" class="font-semibold hover:underline">
+              {{ item.title }}
+            </a>
+            <span class="text-xs text-gray-500 ml-2">{{ item.published }}</span>
+          </div>
+          <div class="flex items-center space-x-2">
+            <!-- Copy Link -->
+            <button class="btn btn-sm btn-square" onclick="copyToClipboard('{{ item.link }}')" title="Copy Link">
+              <!-- Heroicon: Clipboard -->
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" 
+                   viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                      d="M8 2H16C17.1046 2 18 2.8954 18 4V6C18 7.1046 17.1046 8 16 8H8C6.8954 8 6 7.1046 6 6V4C6 2.8954 6.8954 2 8 2ZM8 8H16V20C16 21.1046 15.1046 22 14 22H10C8.8954 22 8 21.1046 8 20V8Z" />
+              </svg>
+            </button>
+            <!-- Add to Project (disabled) -->
+            <button class="btn btn-sm btn-square" disabled title="Add to Project">
+              <!-- Heroicon: Plus -->
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" 
+                   viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                      d="M12 4v16m8-8H4" />
+              </svg>
+            </button>
+            <!-- Read More (Modal Trigger) -->
+            <label for="modal-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" 
+                   class="btn btn-sm btn-square modal-button" title="Read More"
+                   onclick="loadFullArticle('{{ item.link }}', '{{ cat.category|replace(' ', '-') }}-{{ loop.index }}')">
+              <!-- Heroicon: Eye -->
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" 
+                   viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                      d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                      d="M2.458 12C3.732 7.943 7.523 5 12 5c4.477 0 8.268 2.943 9.542 7-1.274 4.057-5.065 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+              </svg>
+            </label>
+          </div>
+        </div>
+
+        <!-- Minimal Modal (checkbox approach) -->
+        <input type="checkbox" id="modal-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="modal-toggle" />
+        <label for="modal-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="modal cursor-pointer">
+          <label class="modal-box relative w-full max-w-2xl max-h-[50vh] overflow-y-auto" for="">
+            <!-- “X” button in top-right corner -->
+            <label for="modal-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" 
+                   class="btn btn-sm btn-circle absolute right-2 top-2">✕</label>
+            <h3 class="font-bold text-lg mb-4">
+              <a href="{{ item.link }}" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
+            </h3>
+            <!-- Container for full text, loaded via JavaScript -->
+            <div id="modal-content-{{ cat.category|replace(' ', '-') }}-{{ loop.index }}" class="text-sm leading-6">
+              <p>Loading...</p>
+            </div>
+          </label>
+        </label>
+      {% endfor %}
+    </div>
+  </section>
+{% endfor %}
+
+<script>
+  // Toast function as before
+  function showToast(message) {
+    const toastContainer = document.getElementById("toast-container");
+    if (!toastContainer) return;
+    const toast = document.createElement("div");
+    toast.className = "alert alert-success shadow-lg animate-fadeInOut";
+    toast.innerHTML = `<span>${message}</span>`;
+    toastContainer.appendChild(toast);
+    setTimeout(() => { toast.remove(); }, 2000);
+  }
+
+  function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      showToast("Link copied!");
+    }).catch(err => {
+      console.error('Error copying text: ', err);
+    });
+  }
+
+  async function loadFullArticle(articleUrl, modalId) {
+    const modalContent = document.getElementById('modal-content-' + modalId);
+    modalContent.innerHTML = "<p>Loading...</p>";
+    try {
+      const response = await fetch(`/article-full-text?url=${encodeURIComponent(articleUrl)}`);
+      const data = await response.json();
+      if (data.content) {
+        const paragraphs = data.content.split("\n\n");
+        const formatted = paragraphs.map(p => `<p class="mb-2">${p}</p>`).join("");
+        modalContent.innerHTML = formatted;
+      } else if (data.error) {
+        modalContent.innerHTML = `<p class="text-red-500">Error: ${data.error}</p>`;
+      } else {
+        modalContent.innerHTML = "<p class='text-red-500'>No content found.</p>";
+      }
+    } catch (err) {
+      console.error(err);
+      modalContent.innerHTML = "<p class='text-red-500'>Failed to load article content.</p>";
+    }
+  }
+</script>
+
+<style>
+@keyframes fadeInOut {
+  0%   { opacity: 0; transform: translateY(-10px); }
+  10%  { opacity: 1; transform: translateY(0); }
+  90%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-10px); }
+}
+.animate-fadeInOut {
+  animation: fadeInOut 2s ease-in-out forwards;
+}
+</style>
+{% endblock %}

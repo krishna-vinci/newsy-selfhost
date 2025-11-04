@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en"
+  x-data="{
+    theme: localStorage.getItem('theme') || 'light',
+    toggleTheme() {
+      this.theme = this.theme === 'light' ? 'dark' : 'light';
+    }
+  }"
+  x-init="
+    $watch('theme', value => {
+      localStorage.setItem('theme', value);
+      document.documentElement.setAttribute('data-theme', value);
+    });
+    document.documentElement.setAttribute('data-theme', theme);
+  ">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}YouTube Workflow{% endblock %}</title>
+  <!-- Tailwind CSS CDN (v2.2.19) -->
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <!-- DaisyUI for additional styling support -->
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@2.51.5/dist/full.css" rel="stylesheet">
+  <!-- HTMX -->
+  <script src="https://unpkg.com/htmx.org@1.8.4"></script>
+  <!-- Alpine.js -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    body { transition: background-color 0.3s, color 0.3s; }
+  </style>
+</head>
+<body class="bg-base-100 text-base-content">
+  <!-- Header -->
+  <header class="navbar bg-base-200 shadow-md px-4">
+    <div class="flex-1">
+      <a class="btn btn-ghost normal-case text-xl" href="/">YouTube Workflow</a>
+    </div>
+    <div class="flex-none items-center">
+      <!-- Navigation Menu -->
+      <ul class="menu menu-horizontal p-0 mr-4">
+        <li><a href="/">Home</a></li>
+        <li><a href="/trends">Trends</a></li>
+        <li><a href="/feeds">Feeds</a></li>
+        <li><a href="/projects">Projects</a></li>
+      </ul>
+      <!-- Dark Mode Toggle Button -->
+      <button @click="toggleTheme" class="btn btn-square btn-ghost" aria-label="Toggle Dark Mode">
+        <svg x-show="theme==='light'" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" 
+             viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                d="M12 3v1m0 16v1m8.66-10h-1M4.34 12h-1m15.36 4.66l-.707-.707m-11.314 0L5.34 16.66m12.02-8.02l-.707.707M6.707 8.707l-.707.707M12 5a7 7 0 110 14 7 7 0 010-14z" />
+        </svg>
+        <svg x-show="theme==='dark'" xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="currentColor" 
+             viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+                d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
+        </svg>
+      </button>
+    </div>
+  </header>
+  
+  <!-- Main Content -->
+  <main class="max-w-7xl mx-auto py-10 px-4">
+    {% block content %}{% endblock %}
+  </main>
+  
+  <!-- Footer -->
+  <footer class="bg-base-200 shadow-md mt-10">
+    <div class="max-w-7xl mx-auto px-4 py-6 text-center">
+      © 2025 YouTube Workflow. All rights reserved.
+    </div>
+  </footer>
+</body>
+</html>
