@@ -2,9 +2,9 @@ services:
   fastapi:
     build: .
     ports:
-      - "100.66.97.99:8666:8666"
+      - "8321:8321"
     environment:
-      - DATABASE_URL=postgresql://krishna:1122@db:5432/youtube_cm
+      - DATABASE_URL=postgresql://krishna:1122@rss_newsapp_db:5432/youtube_cm
       - PIXABAY_API_KEY=49326456-41725d5dc7f4b0f0e4f587cc9
       - RSSBRIDGE_HOST=https://rssbridge.krishna.quest
       - METUBE_URL=https://metube.krishna.quest
@@ -17,6 +17,23 @@ services:
     restart: unless-stopped
     networks:
       - db-net
+    depends_on:
+      - rss_newsapp_db
+
+  rss_newsapp_db:
+    image: postgres:alpine
+    environment:
+      - POSTGRES_USER=krishna
+      - POSTGRES_PASSWORD=1122
+      - POSTGRES_DB=youtube_cm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - db-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
 
 networks:
   db-net:
