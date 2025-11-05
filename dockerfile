@@ -1,9 +1,6 @@
 FROM python:3.11-slim
 
-# Install system dependencies required for psycopg2
-RUN apt-get update && apt-get install -y \
-    libpq-dev gcc \
-    && rm -rf /var/lib/apt/lists/*
+# No system dependencies required for asyncpg
 
 WORKDIR /app
 
