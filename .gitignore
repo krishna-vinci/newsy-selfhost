@@ -4,3 +4,5 @@ __pycache__/main.cpython-311.pyc
 __pycache__/main.cpython-311.pyc
 venv/
 docker-compose.yml.bak/
+node_modules/
+frontend/node_modules/

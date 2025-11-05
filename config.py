@@ -16,16 +16,13 @@ class Config:
     FASTAPI_HOST_PORT = os.getenv("FASTAPI_HOST_PORT", "8666")
     
     # Other Services / API Keys
-    PIXABAY_API_KEY = os.getenv("PIXABAY_API_KEY")
     RSSBRIDGE_HOST = os.getenv("RSSBRIDGE_HOST", "http://91/99.19.202:3333")
-    METUBE_URL = os.getenv("METUBE_URL", "http://192.168.0.122:8081")
     NITTER_URL = os.getenv("NITTER_URL", "https://nitter.space")
+
+    # Data Retention Policy
+    DEFAULT_ARTICLE_RETENTION_DAYS = int(os.getenv("DEFAULT_ARTICLE_RETENTION_DAYS", 30))
 
      # New variables for the Telegram bot and AI
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:2112")  # default for local
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-    
-    # Paths
-    PROJECTS_ROOT = os.getenv("PROJECTS_ROOT", "/app/data/youtube-videos")
-    DAILY_REPORT_DIR = os.getenv("DAILY_REPORT_DIR", "/app/data/daily_report")
