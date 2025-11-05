@@ -1,13 +1,15 @@
 <script lang="ts">
-	import type { PageData } from './$types.js';
-	import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink } from '@lucide/svelte';
-	import { toast } from 'svelte-sonner';
-	import Button from '$lib/components/ui/button/index.svelte';
-	import Badge from '$lib/components/ui/badge/index.svelte';
-	import Separator from '$lib/components/ui/separator/index.svelte';
-	import * as Select from '$lib/components/ui/select/index.js';
-	import Dialog from '$lib/components/ui/dialog/index.svelte';
-	import Card from '$lib/components/ui/card/index.svelte';
+import type { PageData } from './$types.js';
+import { invalidateAll } from '$app/navigation';
+import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink } from '@lucide/svelte';
+import { toast } from 'svelte-sonner';
+import Button from '$lib/components/ui/button/index.svelte';
+import Badge from '$lib/components/ui/badge/index.svelte';
+import Separator from '$lib/components/ui/separator/index.svelte';
+import Dialog from '$lib/components/ui/dialog/index.svelte';
+import Card from '$lib/components/ui/card/index.svelte';
+import * as Sidebar from '$lib/components/ui/sidebar/index.js';
+import FeedSidebar from '$lib/components/FeedSidebar.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -26,24 +28,19 @@
 		feed_items: FeedItem[];
 	};
 
-	// State
-	let viewMode = $state<ViewMode>('card');
-	let selectedCategory = $state<string>('all');
-	let modalOpen = $state(false);
-	let selectedArticle = $state<FeedItem | null>(null);
-	let articleContent = $state<string>('');
-	let isLoadingContent = $state(false);
-	let selectedColumnIndex = $state<number>(0);
+// State
+let viewMode = $state<ViewMode>('card');
+let selectedCategory = $state<string>('all');
+let modalOpen = $state(false);
+let selectedArticle = $state<FeedItem | null>(null);
+let articleContent = $state<string>('');
+let isLoadingContent = $state(false);
+let selectedColumnIndex = $state<number>(0);
 
-	// Derived
-	const categories = $derived(data.categories as Category[] || []);
-	const categoryOptions = $derived([
-		{ value: 'all', label: 'All Categories' },
-		...Array.from(new Set(categories.map(cat => cat.category).filter(Boolean)))
-			.map(category => ({ value: category, label: category }))
-	]);
+// Derived
+const categories = $derived(data.categories as Category[] || []);
 
-	const filteredArticles = $derived(
+const filteredArticles = $derived(
 		selectedCategory === 'all'
 			? categories.flatMap(cat => cat.feed_items)
 			: categories.find(cat => cat.category === selectedCategory)?.feed_items || []
@@ -98,8 +95,16 @@
 		loadArticleContent(article.link);
 	}
 
-	// Keyboard navigation for column view
-	function handleKeydown(event: KeyboardEvent) {
+function handleCategorySelect(category: string) {
+selectedCategory = category;
+}
+
+async function handleConfigChanged() {
+await invalidateAll();
+}
+
+// Keyboard navigation for column view
+function handleKeydown(event: KeyboardEvent) {
 		if (viewMode !== 'column' || filteredArticles.length === 0) return;
 		
 		if (event.key === 'ArrowDown') {
@@ -113,72 +118,68 @@
 		}
 	}
 
-	// Initialize column view
-	$effect(() => {
-		if (viewMode === 'column' && filteredArticles.length > 0) {
-			selectedColumnIndex = 0;
-			loadArticleContent(filteredArticles[0].link);
-		}
-	});
+// Initialize column view
+$effect(() => {
+if (viewMode === 'column' && filteredArticles.length > 0) {
+selectedColumnIndex = 0;
+loadArticleContent(filteredArticles[0].link);
+}
+});
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
+<Sidebar.Provider>
+<div class="flex min-h-screen w-full">
+<!-- Sidebar -->
+<FeedSidebar {selectedCategory} onCategorySelect={handleCategorySelect} onconfigchanged={handleConfigChanged} />
+
+<!-- Main Content -->
+<Sidebar.Inset>
 <div class="container mx-auto max-w-7xl px-4 py-8">
-	<!-- Header -->
-	<div class="mb-8 flex flex-col gap-4">
-		<Separator />
+<!-- Header -->
+<div class="mb-8 flex flex-col gap-4">
+<div class="flex items-center justify-between">
+<div class="flex items-center gap-2">
+<Sidebar.Trigger />
+<h1 class="text-2xl font-bold">
+{selectedCategory === 'all' ? 'All Feeds' : selectedCategory}
+</h1>
+</div>
 
-		<!-- Filters and View Mode -->
-		<div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-			<!-- Category Filter -->
-			<div class="w-full sm:w-64">
-				<Select.Root type="single" bind:value={selectedCategory}>
-					<Select.Trigger class="w-full">
-						{categoryOptions.find(opt => opt.value === selectedCategory)?.label || 'Select category'}
-					</Select.Trigger>
-					<Select.Content>
-						{#each categoryOptions as option (option.value)}
-							<Select.Item value={option.value} label={option.label}>
-								{option.label}
-							</Select.Item>
-						{/each}
-					</Select.Content>
-				</Select.Root>
-			</div>
+<!-- View Mode Toggle -->
+<div class="flex gap-2">
+<Button
+variant={viewMode === 'card' ? 'default' : 'outline'}
+size="icon"
+onclick={() => viewMode = 'card'}
+aria-label="Card view"
+>
+<LayoutGrid class="size-4" />
+</Button>
+<Button
+variant={viewMode === 'headline' ? 'default' : 'outline'}
+size="icon"
+onclick={() => viewMode = 'headline'}
+aria-label="Headline view"
+>
+<List class="size-4" />
+</Button>
+<Button
+variant={viewMode === 'column' ? 'default' : 'outline'}
+size="icon"
+onclick={() => viewMode = 'column'}
+aria-label="Column view"
+>
+<Columns2 class="size-4" />
+</Button>
+</div>
+</div>
+<Separator />
+</div>
 
-			<!-- View Mode Toggle -->
-			<div class="flex gap-2">
-				<Button
-					variant={viewMode === 'card' ? 'default' : 'outline'}
-					size="icon"
-					onclick={() => viewMode = 'card'}
-					aria-label="Card view"
-				>
-					<LayoutGrid class="size-4" />
-				</Button>
-				<Button
-					variant={viewMode === 'headline' ? 'default' : 'outline'}
-					size="icon"
-					onclick={() => viewMode = 'headline'}
-					aria-label="Headline view"
-				>
-					<List class="size-4" />
-				</Button>
-				<Button
-					variant={viewMode === 'column' ? 'default' : 'outline'}
-					size="icon"
-					onclick={() => viewMode = 'column'}
-					aria-label="Column view"
-				>
-					<Columns2 class="size-4" />
-				</Button>
-			</div>
-		</div>
-	</div>
-
-	<!-- Content -->
-	{#if filteredArticles.length === 0}
+<!-- Content -->
+{#if filteredArticles.length === 0}
 		<div class="flex flex-col items-center justify-center py-16 text-center">
 			<p class="text-lg text-muted-foreground">No articles found</p>
 			<p class="text-sm text-muted-foreground">Try selecting a different category</p>
@@ -359,6 +360,9 @@
 		</div>
 	{/if}
 </div>
+</Sidebar.Inset>
+</div>
+</Sidebar.Provider>
 
 <!-- Article Modal -->
 {#if selectedArticle}

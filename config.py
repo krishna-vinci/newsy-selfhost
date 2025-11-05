@@ -19,8 +19,10 @@ class Config:
     RSSBRIDGE_HOST = os.getenv("RSSBRIDGE_HOST", "http://91/99.19.202:3333")
     NITTER_URL = os.getenv("NITTER_URL", "https://nitter.space")
 
+    # Data Retention Policy
+    DEFAULT_ARTICLE_RETENTION_DAYS = int(os.getenv("DEFAULT_ARTICLE_RETENTION_DAYS", 30))
+
      # New variables for the Telegram bot and AI
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:2112")  # default for local
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-

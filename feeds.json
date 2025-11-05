@@ -1,0 +1,99 @@
+{
+  "World Tech": [
+    {
+      "name": "Ars Technica",
+      "url": "https://feeds.arstechnica.com/arstechnica/index/",
+      "isActive": true
+    },
+    {
+      "name": "Wired",
+      "url": "https://www.wired.com/feed/rss",
+      "isActive": true
+    },
+    {
+      "name": "The Verge",
+      "url": "https://www.theverge.com/rss/index.xml",
+      "isActive": true
+    },
+    {
+      "name": "IEEE Spectrum",
+      "url": "https://spectrum.ieee.org/rss/fulltext",
+      "isActive": true
+    },
+    {
+      "name": "TechRadar",
+      "url": "https://www.techradar.com/rss",
+      "isActive": true
+    }
+  ],
+  "India Tech": [
+    {
+      "name": "Medianama",
+      "url": "https://www.medianama.com/feed/",
+      "isActive": true
+    },
+    {
+      "name": "Business Standard – Tech",
+      "url": "https://www.business-standard.com/rss/technology-108.rss",
+      "isActive": true
+    }
+  ],
+  "World News": [
+    {
+      "name": "Reuters World",
+      "url": "https://www.reutersagency.com/feed/?best-topics=world",
+      "isActive": true
+    },
+    {
+      "name": "Al Jazeera",
+      "url": "https://www.aljazeera.com/xml/rss/all.xml",
+      "isActive": true
+    }
+  ],
+  "India News": [
+    {
+      "name": "The Hindu",
+      "url": "https://www.thehindu.com/news/?service=rss",
+      "isActive": true
+    },
+    {
+      "name": "Indian Express Explained",
+      "url": "https://indianexpress.com/section/explained/feed/",
+      "isActive": true
+    }
+  ],
+  "World Commentary": [
+    {
+      "name": "Foreign Affairs",
+      "url": "https://www.foreignaffairs.com/rss.xml",
+      "isActive": true
+    },
+    {
+      "name": "The Atlantic – Ideas",
+      "url": "https://www.theatlantic.com/feed/channel/ideas/",
+      "isActive": true
+    },
+    {
+      "name": "MIT Tech Review",
+      "url": "https://www.technologyreview.com/feed/",
+      "isActive": true
+    },
+    {
+      "name": "The Economist",
+      "url": "https://www.economist.com/latest/rss.xml",
+      "isActive": true
+    }
+  ],
+  "India Commentary": [
+    {
+      "name": "The Print – Opinion",
+      "url": "https://theprint.in/category/opinion/feed/",
+      "isActive": true
+    },
+    {
+      "name": "Scroll.in – Featured",
+      "url": "https://scroll.in/feed",
+      "isActive": true
+    }
+  ]
+}
