@@ -1,13 +1,14 @@
 <script lang="ts">
 	import type { PageData } from './$types.js';
-	import { Copy, Eye, LayoutGrid, List, ExternalLink } from '@lucide/svelte';
+	import { Copy, Eye, LayoutGrid, List, ExternalLink } from '@lucide/svelte/icons';
 	import { toast } from 'svelte-sonner';
 	import Button from '$lib/components/ui/button/index.svelte';
-	import Badge from '$lib/components/ui/badge/index.svelte';
 	import Separator from '$lib/components/ui/separator/index.svelte';
 	import * as Select from '$lib/components/ui/select/index.js';
 	import Dialog from '$lib/components/ui/dialog/index.svelte';
 	import Card from '$lib/components/ui/card/index.svelte';
+	import TrendsItem from '$lib/components/TrendsItem.svelte';
+	import TwitterFeedItem from '$lib/components/TwitterFeedItem.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -31,24 +32,27 @@
 	let selectedArticle = $state<FeedItem | null>(null);
 	let articleContent = $state<string>('');
 	let isLoadingContent = $state(false);
-	let currentSource = $state<string>('youtube');
+	let activeTab = $state<'youtube' | 'google' | 'twitter'>('youtube');
 
 	// Derived
-	const channels = $derived(data.trends?.channels as Channel[] || []);
+	const youtubeChannels = $derived(data.youtube?.channels as Channel[] || []);
+	const googleTrends = $derived(data.google?.channels[0]?.feed_items as FeedItem[] || []);
+	const twitterFeed = $derived(data.twitter?.channels[0]?.feed_items as FeedItem[] || []);
+
 	const channelOptions = $derived([
 		{ value: 'all', label: 'All Channels' },
-		...channels.map(ch => ({ value: ch.name, label: ch.name }))
+		...youtubeChannels.map(ch => ({ value: ch.name, label: ch.name }))
 	]);
 
-	const filteredArticles = $derived(
+	const filteredYoutubeArticles = $derived(
 		selectedChannel === 'all' || !selectedChannel
-			? channels.flatMap(ch => ch.feed_items)
-			: channels.find(ch => ch.name === selectedChannel)?.feed_items || []
+			? youtubeChannels.flatMap(ch => ch.feed_items)
+			: youtubeChannels.find(ch => ch.name === selectedChannel)?.feed_items || []
 	);
 
 	// Initialize selected channel
 	$effect(() => {
-		if (channels.length > 0 && !selectedChannel) {
+		if (youtubeChannels.length > 0 && !selectedChannel) {
 			selectedChannel = 'all';
 		}
 	});
@@ -104,10 +108,39 @@
 <div class="container mx-auto max-w-7xl px-4 py-8">
 	<!-- Header -->
 	<div class="mb-8 flex flex-col gap-4">
+		<div class="flex items-center justify-between">
+			<h1 class="text-2xl font-bold">Trends</h1>
+			<div class="flex gap-2 rounded-md bg-muted p-1">
+				<Button
+					variant={activeTab === 'youtube' ? 'default' : 'ghost'}
+					size="sm"
+					onclick={() => activeTab = 'youtube'}
+				>
+					YouTube
+				</Button>
+				<Button
+					variant={activeTab === 'google' ? 'default' : 'ghost'}
+					size="sm"
+					onclick={() => activeTab = 'google'}
+				>
+					Google
+				</Button>
+				<Button
+					variant={activeTab === 'twitter' ? 'default' : 'ghost'}
+					size="sm"
+					onclick={() => activeTab = 'twitter'}
+				>
+					Twitter
+				</Button>
+			</div>
+		</div>
 		<Separator />
+	</div>
 
+	<!-- YouTube Content -->
+	{#if activeTab === 'youtube'}
 		<!-- Filters and View Mode -->
-		<div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+		<div class="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 			<!-- Channel Filter -->
 			<div class="w-full sm:w-64">
 				<Select.Root type="single" bind:value={selectedChannel}>
@@ -132,7 +165,7 @@
 					onclick={() => viewMode = 'card'}
 					aria-label="Card view"
 				>
-					<LayoutGrid class="size-4" />
+					<svelte:component this={LayoutGrid} class="size-4" />
 				</Button>
 				<Button
 					variant={viewMode === 'headline' ? 'default' : 'outline'}
@@ -140,105 +173,149 @@
 					onclick={() => viewMode = 'headline'}
 					aria-label="Headline view"
 				>
-					<List class="size-4" />
+					<svelte:component this={List} class="size-4" />
 				</Button>
 			</div>
 		</div>
-	</div>
 
-	<!-- Content -->
-	{#if filteredArticles.length === 0}
-		<div class="flex flex-col items-center justify-center py-16 text-center">
-			<p class="text-lg text-muted-foreground">No articles found</p>
-			<p class="text-sm text-muted-foreground">Try selecting a different channel</p>
-		</div>
-	{:else if viewMode === 'card'}
-		<!-- Card View -->
-		<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-			{#each filteredArticles as article}
-				<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg">
-					<div class="flex flex-grow flex-col gap-4">
-						{#if article.thumbnail}
-							<div class="relative -mt-6 -mx-6 overflow-hidden rounded-t-xl">
+		{#if filteredYoutubeArticles.length === 0}
+			<div class="flex flex-col items-center justify-center py-16 text-center">
+				<p class="text-lg text-muted-foreground">No articles found</p>
+				<p class="text-sm text-muted-foreground">Try selecting a different channel</p>
+			</div>
+		{:else if viewMode === 'card'}
+			<!-- Card View -->
+			<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+				{#each filteredYoutubeArticles as article}
+					<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg">
+						<div class="flex flex-grow flex-col gap-4">
+							{#if article.thumbnail}
+								<div class="relative -mt-6 -mx-6 overflow-hidden rounded-t-xl">
+									<img
+										src={article.thumbnail}
+										alt={article.title}
+										class="h-48 w-full object-cover transition-transform duration-300 group-hover:scale-105"
+										onerror={(e) => {
+											(e.currentTarget as HTMLImageElement).src = '/default-thumbnail.jpg';
+										}}
+									/>
+								</div>
+							{/if}
+							<div class="flex flex-grow flex-col justify-between gap-3 px-6">
+								<div>
+									<span class="text-xs text-muted-foreground">{article.published}</span>
+									<h3 class="mt-2 line-clamp-2 text-lg font-semibold leading-tight">{article.title}</h3>
+									{#if article.description}
+										<p class="mt-1 line-clamp-3 text-sm text-muted-foreground">{article.description}</p>
+									{/if}
+								</div>
+								<div class="flex justify-end gap-2">
+									<Button
+										variant="outline"
+										size="icon-sm"
+										onclick={() => openArticleModal(article)}
+									>
+										<svelte:component this={Eye} class="size-4" />
+									</Button>
+									<Button
+										variant="outline"
+										size="icon-sm"
+										onclick={() => copyToClipboard(article.link)}
+									>
+										<svelte:component this={Copy} class="size-4" />
+									</Button>
+								</div>
+							</div>
+						</div>
+					</Card>
+				{/each}
+			</div>
+		{:else if viewMode === 'headline'}
+			<!-- Headline View -->
+			<div class="flex flex-col gap-2">
+				{#each filteredYoutubeArticles as article}
+					<Card class="group transition-all hover:shadow-md">
+						<div class="flex items-start gap-4 px-6 py-4">
+							{#if article.thumbnail}
 								<img
 									src={article.thumbnail}
 									alt={article.title}
-									class="h-48 w-full object-cover transition-transform duration-300 group-hover:scale-105"
+									class="h-16 w-24 shrink-0 rounded-md object-cover"
 									onerror={(e) => {
 										(e.currentTarget as HTMLImageElement).src = '/default-thumbnail.jpg';
 									}}
 								/>
-							</div>
-						{/if}
-						<div class="flex flex-grow flex-col justify-between gap-3 px-6">
-							<div>
+							{/if}
+							<div class="flex min-w-0 flex-1 flex-col gap-2">
 								<span class="text-xs text-muted-foreground">{article.published}</span>
-								<h3 class="mt-2 line-clamp-2 text-lg font-semibold leading-tight">{article.title}</h3>
-								{#if article.description}
-									<p class="mt-1 line-clamp-3 text-sm text-muted-foreground">{article.description}</p>
-								{/if}
+								<h3 class="line-clamp-2 text-base font-semibold leading-snug">{article.title}</h3>
 							</div>
-							<div class="flex justify-end gap-2">
+							<div class="flex shrink-0 gap-2">
 								<Button
-									variant="outline"
+									variant="ghost"
 									size="icon-sm"
 									onclick={() => openArticleModal(article)}
 								>
-									<Eye class="size-4" />
+									<svelte:component this={Eye} class="size-4" />
 								</Button>
 								<Button
-									variant="outline"
+									variant="ghost"
 									size="icon-sm"
 									onclick={() => copyToClipboard(article.link)}
 								>
-									<Copy class="size-4" />
+									<svelte:component this={Copy} class="size-4" />
 								</Button>
 							</div>
 						</div>
-					</div>
-				</Card>
-			{/each}
-		</div>
-	{:else if viewMode === 'headline'}
-		<!-- Headline View -->
-		<div class="flex flex-col gap-2">
-			{#each filteredArticles as article}
-				<Card class="group transition-all hover:shadow-md">
-					<div class="flex items-start gap-4 px-6 py-4">
-						{#if article.thumbnail}
-							<img
-								src={article.thumbnail}
-								alt={article.title}
-								class="h-16 w-24 shrink-0 rounded-md object-cover"
-								onerror={(e) => {
-									(e.currentTarget as HTMLImageElement).src = '/default-thumbnail.jpg';
-								}}
-							/>
-						{/if}
-						<div class="flex min-w-0 flex-1 flex-col gap-2">
-							<span class="text-xs text-muted-foreground">{article.published}</span>
-							<h3 class="line-clamp-2 text-base font-semibold leading-snug">{article.title}</h3>
-						</div>
-						<div class="flex shrink-0 gap-2">
-							<Button
-								variant="ghost"
-								size="icon-sm"
-								onclick={() => openArticleModal(article)}
-							>
-								<Eye class="size-4" />
-							</Button>
-							<Button
-								variant="ghost"
-								size="icon-sm"
-								onclick={() => copyToClipboard(article.link)}
-							>
-								<Copy class="size-4" />
-							</Button>
-						</div>
-					</div>
-				</Card>
-			{/each}
-		</div>
+					</Card>
+				{/each}
+			</div>
+		{/if}
+	{/if}
+
+	<!-- Google Trends Content -->
+	{#if activeTab === 'google'}
+		{#if googleTrends.length === 0}
+			<div class="flex flex-col items-center justify-center py-16 text-center">
+				<p class="text-lg text-muted-foreground">No Google Trends data available</p>
+			</div>
+		{:else}
+			<div>
+				<!-- Header -->
+				<div
+					class="grid grid-cols-[minmax(0,3fr),1fr,1fr,minmax(0,2fr),auto] items-center gap-6 px-4 py-2"
+				>
+					<h4 class="text-sm font-medium text-muted-foreground">Trend</h4>
+					<h4 class="text-right text-sm font-medium text-muted-foreground">Search volume</h4>
+					<h4 class="text-right text-sm font-medium text-muted-foreground">Started</h4>
+					<h4 class="text-sm font-medium text-muted-foreground">Trend breakdown</h4>
+					<div class="w-24"></div>
+				</div>
+				<Separator class="mb-2" />
+
+				<!-- List -->
+				<div class="flex flex-col gap-2">
+					{#each googleTrends as item}
+						<TrendsItem {item} />
+					{/each}
+				</div>
+			</div>
+		{/if}
+	{/if}
+
+	<!-- Twitter Content -->
+	{#if activeTab === 'twitter'}
+		{#if twitterFeed.length === 0}
+			<div class="flex flex-col items-center justify-center py-16 text-center">
+				<p class="text-lg text-muted-foreground">No tweets available</p>
+			</div>
+		{:else}
+			<div class="flex flex-col gap-2">
+				{#each twitterFeed as item}
+					<TwitterFeedItem {item} />
+				{/each}
+			</div>
+		{/if}
 	{/if}
 </div>
 
@@ -254,7 +331,7 @@
 						size="sm"
 						onclick={() => copyToClipboard(selectedArticle!.link)}
 					>
-						<Copy class="size-4" />
+						<svelte:component this={Copy} class="size-4" />
 						Copy Link
 					</Button>
 					<Button
@@ -264,7 +341,7 @@
 						target="_blank"
 						rel="noopener noreferrer"
 					>
-						<ExternalLink class="size-4" />
+						<svelte:component this={ExternalLink} class="size-4" />
 						Open
 					</Button>
 				</div>
