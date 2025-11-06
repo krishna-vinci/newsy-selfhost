@@ -48,6 +48,7 @@ import time
 import unicodedata
 
 from config import Config  # Import our centralized config
+import reports  # Import reports module
 
 load_dotenv()  # Load environment variables
 
@@ -74,11 +75,11 @@ RSS_FEED_URLS = {
         },
     ],
     "twitter": [
-         {
+        {
             "name": "Twitter Feed",
             "url": "https://rss.xcancel.com/POTUS/rss"
-         }
-     ],
+        }
+    ],
     "google": [
         {
             "name": "Google Trends",
@@ -123,6 +124,9 @@ app.add_middleware(
 templates = Jinja2Templates(directory="templates")
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# Include reports router
+app.include_router(reports.router)
 
 
 def truncate_words(text, max_words=100):
@@ -622,6 +626,9 @@ async def startup_event():
     FastAPICache.init(RedisBackend(redis_client), prefix="fastapi-cache")
     await init_db()
     
+    # Initialize reports database
+    await reports.init_reports_db()
+    
     # Run the first feed fetch in the background immediately on startup
     asyncio.create_task(fetch_all_feeds_db())
     # Build initial search index
@@ -631,6 +638,9 @@ async def startup_event():
     scheduler.add_job(cleanup_old_articles, 'cron', hour=0)  # Run daily at midnight
     scheduler.add_job(build_search_index, 'interval', minutes=5)  # Update search index every 5 minutes
     scheduler.start()
+    
+    # Load and schedule reports
+    await reports.load_and_schedule_reports(scheduler)
 
 @app.on_event("shutdown")
 async def shutdown_event():
