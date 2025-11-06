@@ -13,6 +13,7 @@ import markdown2
 import html2text
 from newspaper import Article
 from bs4 import BeautifulSoup
+from markdown_it import MarkdownIt
 
 from dotenv import load_dotenv
 
@@ -24,8 +25,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from fastapi_cache import FastAPICache
-from fastapi_cache.backends.inmemory import InMemoryBackend
+from fastapi_cache.backends.redis import RedisBackend
 from fastapi_cache.decorator import cache
+import redis.asyncio as aioredis
+from rapidfuzz import fuzz, process
 
 import asyncpg
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -50,15 +53,15 @@ load_dotenv()  # Load environment variables
 
 # --- Global Configuration & Feed Variables ---
 RSS_FEED_URLS = {
-     "reddit": [
-         {
-             "name": "r/Indiaspeaks",
-             "url": f"http://{Config.RSSBRIDGE_HOST}/?action=display&bridge=RedditBridge&context=single&r=IndiaSpeaks&f=&score=50&d=hot&search=&frontend=https%3A%2F%2Fold.reddit.com&format=Atom"
-         },
-         {
-             "name": "worldnews",
-             "url": f"http://{Config.RSSBRIDGE_HOST}/?action=display&bridge=RedditBridge&context=single&r=selfhosted&f=&score=&d=top&search=&frontend=https%3A%2F%2Fold.reddit.com&format=Atom"
-         },
+    "reddit": [
+        {
+            "name": "r/Indiaspeaks",
+            "url": f"http://{Config.RSSBRIDGE_HOST}/?action=display&bridge=RedditBridge&context=single&r=IndiaSpeaks&f=&score=50&d=hot&search=&frontend=https%3A%2F%2Fold.reddit.com&format=Atom"
+        },
+        {
+            "name": "worldnews",
+            "url": f"http://{Config.RSSBRIDGE_HOST}/?action=display&bridge=RedditBridge&context=single&r=selfhosted&f=&score=&d=top&search=&frontend=https%3A%2F%2Fold.reddit.com&format=Atom"
+        },
      ],
     "youtube": [
         {
@@ -70,12 +73,18 @@ RSS_FEED_URLS = {
             "url": f"{Config.RSSBRIDGE_HOST}/?action=display&bridge=YoutubeBridge&context=By+channel+id&c=UCb-xXZ7ltTvrh9C6DgB9H-Q&duration_min=2&duration_max=&format=Atom"
         },
     ],
-    "Twitter Feed": [
+    "twitter": [
          {
-             "name": "Twitter Feed",
-             "url": Config.NITTER_URL
+            "name": "Twitter Feed",
+            "url": "https://rss.xcancel.com/POTUS/rss"
          }
-     ]
+     ],
+    "google": [
+        {
+            "name": "Google Trends",
+            "url": "https://trends.google.com/trending/rss?geo=IN"
+        }
+    ]
 }
 
 # The feeds.json file is no longer the source of truth. The database is.
@@ -160,7 +169,7 @@ async def init_db():
     );
     """)
     await conn.execute("""
-    CREATE TABLE IF NOT EXISTS "YouTube-articles" (
+    CREATE TABLE IF NOT EXISTS articles (
         id SERIAL PRIMARY KEY,
         title TEXT NOT NULL,
         link TEXT UNIQUE NOT NULL,
@@ -171,7 +180,8 @@ async def init_db():
         category TEXT,
         content TEXT,
         source TEXT,
-        feed_id INTEGER REFERENCES feeds(id) ON DELETE CASCADE
+        feed_id INTEGER REFERENCES feeds(id) ON DELETE CASCADE,
+        starred BOOLEAN DEFAULT false
     );
     """)
     await conn.execute("""
@@ -256,30 +266,32 @@ async def update_feed_last_update(feed_url: str, new_update: datetime):
 
 
 
-# --- HTML to Markdown Conversion Helper ---
-def convert_html_to_markdown(html_content: str) -> str:
+# --- HTML Cleaning and Formatting Helper ---
+def format_article_content(html_content: str) -> str:
+    """
+    Cleans, standardizes, and formats HTML content for consistent display.
+    """
     try:
-        soup = BeautifulSoup(html_content, 'html.parser')
-        for p in soup.find_all('p'):
-            p.insert_before("\n\n")
-            p.append("\n\n")
-        for br in soup.find_all('br'):
-            br.replace_with("\n")
-        cleaned_html = str(soup)
-        
+        # First, convert incoming HTML to Markdown to strip out proprietary classes,
+        # styles, and other unnecessary tags.
         converter = html2text.HTML2Text()
-        converter.ignore_images = False
         converter.ignore_links = False
-        converter.bypass_tables = False
-        converter.body_width = 0
+        converter.ignore_images = False
+        converter.body_width = 0  # No wrapping
+        markdown_content = converter.handle(html_content)
+
+        # Aggressively create paragraph breaks. Replace any sequence of one or more
+        # newlines with a double newline. This ensures that the Markdown renderer
+        # creates proper <p> tags.
+        markdown_content_with_breaks = re.sub(r'\n+', '\n\n', markdown_content)
+
+        # Now, convert the clean Markdown back to clean, semantic HTML using markdown2.
+        clean_html = markdown2.markdown(markdown_content_with_breaks)
         
-        markdown_text = converter.handle(cleaned_html)
-        markdown_text = "\n".join(line.rstrip() for line in markdown_text.splitlines())
-        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
-        return markdown_text.strip()
+        return clean_html
     except Exception as e:
-        logging.exception("Error converting HTML to Markdown: %s", e)
-        return html_content
+        logging.exception("Error formatting article content: %s", e)
+        return f"<p>Error processing article content: {e}</p>"
     
 
 
@@ -423,8 +435,9 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
         feed = feedparser.parse(resp.content)
 
         last_update = await get_feed_last_update(rss_url)
-        threshold = last_update if last_update else datetime.now(IST) - timedelta(days=2)
-        new_last_update = threshold
+        # If it's the first fetch, go back 3 days, otherwise use the last update time.
+        threshold = last_update if last_update else datetime.now(IST) - timedelta(days=3)
+        new_last_update = last_update or threshold
 
         conn = await get_db_connection()
 
@@ -459,7 +472,7 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
             if pub_dt > new_last_update:
                 new_last_update = pub_dt
 
-            if await conn.fetchval('SELECT id FROM "YouTube-articles" WHERE link = $1', link):
+            if await conn.fetchval('SELECT id FROM articles WHERE link = $1', link):
                 continue
 
             try:
@@ -472,7 +485,7 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 article_content = None
 
             await conn.execute(
-                'INSERT INTO "YouTube-articles" '
+                'INSERT INTO articles '
                 '(title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id) '
                 'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
                 title, link, description, thumbnail_url,
@@ -514,20 +527,25 @@ async def fetch_all_feeds_db():
         logging.info("Feed update completed at %s", end_time)
 
 
-async def get_articles_for_category_db(category: str, days: int = 2):
+async def get_articles_for_category_db(category: str, days: int = 2, starred_only: bool = False):
      threshold = datetime.now(IST) - timedelta(days=days)
      conn = await get_db_connection()
      
      query = """
-         SELECT a.title, a.link, a.description, a.thumbnail, a.published, a.published_datetime, a.category, a.content, a.source 
-         FROM "YouTube-articles" a
+         SELECT a.title, a.link, a.description, a.thumbnail, a.published, a.published_datetime, a.category, a.content, a.source, a.starred 
+         FROM articles a
          JOIN feeds f ON a.feed_id = f.id
          WHERE a.category = $1 
          AND a.published_datetime >= $2
          AND f."isActive" = true
-         ORDER BY a.published_datetime DESC
      """
+     
      params = [category, threshold]
+     
+     if starred_only:
+         query += " AND a.starred = true"
+     
+     query += " ORDER BY a.published_datetime DESC"
      
      rows = await conn.fetch(query, *params)
      
@@ -545,7 +563,8 @@ async def get_articles_for_category_db(category: str, days: int = 2):
              "published_datetime": pub_dt_str,
              "category": row['category'],
              "content": row['content'],
-             "source": row['source'] or "Unknown"
+             "source": row['source'] or "Unknown",
+             "starred": row['starred']
          })
      await conn.close()
      return articles
@@ -569,7 +588,7 @@ async def cleanup_old_articles():
                 cutoff_date = datetime.now(IST) - timedelta(days=retention_days)
                 
                 result = await conn.execute(
-                    'DELETE FROM "YouTube-articles" WHERE feed_id = $1 AND published_datetime < $2',
+                    'DELETE FROM articles WHERE feed_id = $1 AND published_datetime < $2',
                     feed['id'], cutoff_date
                 )
                 deleted_count = int(result.split(' ')[1])
@@ -584,17 +603,179 @@ async def cleanup_old_articles():
 
 
 scheduler = AsyncIOScheduler()
+
+# Global Redis client for search index
+redis_client = None
+
 @app.on_event("startup")
 async def startup_event():
-    FastAPICache.init(InMemoryBackend(), prefix="fastapi-cache")
+    global redis_client
+    
+    # Initialize Redis client
+    redis_client = aioredis.from_url(
+        f"redis://{Config.REDIS_HOST}:{Config.REDIS_PORT}/{Config.REDIS_DB}",
+        encoding="utf-8",
+        decode_responses=True
+    )
+    
+    # Initialize FastAPI Cache with Redis backend
+    FastAPICache.init(RedisBackend(redis_client), prefix="fastapi-cache")
     await init_db()
     
     # Run the first feed fetch in the background immediately on startup
     asyncio.create_task(fetch_all_feeds_db())
+    # Build initial search index
+    asyncio.create_task(build_search_index())
     
     scheduler.add_job(fetch_all_feeds_db, 'interval', minutes=1)
     scheduler.add_job(cleanup_old_articles, 'cron', hour=0)  # Run daily at midnight
+    scheduler.add_job(build_search_index, 'interval', minutes=5)  # Update search index every 5 minutes
     scheduler.start()
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global redis_client
+    if redis_client:
+        await redis_client.close()
+
+
+# --- Search Index Functions ---
+async def build_search_index():
+    """
+    Build a search index from all articles in the database and store in Redis.
+    This runs as a background task after feed updates.
+    """
+    global redis_client
+    if not redis_client:
+        logging.warning("Redis client not initialized, skipping search index build")
+        return
+    
+    try:
+        logging.info("Building search index...")
+        conn = await get_db_connection()
+        
+        # Fetch all recent articles (last 30 days by default)
+        threshold = datetime.now(IST) - timedelta(days=Config.DEFAULT_ARTICLE_RETENTION_DAYS)
+        articles = await conn.fetch("""
+            SELECT a.id, a.title, a.description, a.category, a.source, a.link, 
+                   a.thumbnail, a.published, a.published_datetime, a.starred
+            FROM articles a
+            JOIN feeds f ON a.feed_id = f.id
+            WHERE a.published_datetime >= $1 AND f."isActive" = true
+            ORDER BY a.published_datetime DESC
+        """, threshold)
+        
+        # Build search index
+        search_index = {}
+        for article in articles:
+            article_id = str(article['id'])
+            search_index[article_id] = {
+                'id': article_id,
+                'title': article['title'] or '',
+                'description': article['description'] or '',
+                'category': article['category'] or '',
+                'source': article['source'] or '',
+                'link': article['link'] or '',
+                'thumbnail': article['thumbnail'] or '',
+                'published': article['published'] or '',
+                'published_datetime': article['published_datetime'].isoformat() if article['published_datetime'] else None,
+                'starred': article['starred'],
+                # Combined searchable text for fuzzy matching
+                'searchable_text': f"{article['title']} {article['description']} {article['source']}".lower()
+            }
+        
+        # Store in Redis
+        await redis_client.set('search_index', json.dumps(search_index))
+        logging.info(f"Search index built successfully with {len(search_index)} articles")
+        
+        await conn.close()
+    except Exception as e:
+        logging.exception(f"Error building search index: {e}")
+
+
+async def search_articles(
+    query: str,
+    category: str = None,
+    score_threshold: float = None
+) -> list:
+    """
+    Search articles using fuzzy matching with rapidfuzz.
+    
+    Args:
+        query: Search query string
+        category: Optional category filter
+        score_threshold: Minimum fuzzy match score (default from config)
+    
+    Returns:
+        List of matching articles sorted by relevance
+    """
+    global redis_client
+    if not redis_client:
+        logging.warning("Redis client not initialized")
+        return []
+    
+    if score_threshold is None:
+        score_threshold = Config.SEARCH_SCORE_THRESHOLD
+    
+    try:
+        # Fetch search index from Redis
+        index_json = await redis_client.get('search_index')
+        if not index_json:
+            logging.warning("Search index not found in Redis, building now...")
+            await build_search_index()
+            index_json = await redis_client.get('search_index')
+            if not index_json:
+                return []
+        
+        search_index = json.loads(index_json)
+        
+        # Apply category filter if provided
+        if category:
+            search_index = {
+                k: v for k, v in search_index.items() 
+                if v['category'].lower() == category.lower()
+            }
+        
+        # Perform fuzzy search
+        query_lower = query.lower()
+        candidates = {
+            article_id: article['searchable_text'] 
+            for article_id, article in search_index.items()
+        }
+        
+        # Use rapidfuzz to find best matches
+        results = process.extract(
+            query_lower,
+            candidates,
+            scorer=fuzz.WRatio,
+            limit=100,
+            score_cutoff=score_threshold
+        )
+        
+        # Build result list with article details
+        matched_articles = []
+        for text, score, article_id in results:
+            article = search_index[article_id]
+            matched_articles.append({
+                'title': article['title'],
+                'link': article['link'],
+                'description': article['description'],
+                'thumbnail': article['thumbnail'],
+                'published': article['published'],
+                'published_datetime': article['published_datetime'],
+                'category': article['category'],
+                'source': article['source'],
+                'starred': article['starred'],
+                'search_score': round(score, 2)
+            })
+        
+        logging.info(f"Search for '{query}' returned {len(matched_articles)} results")
+        return matched_articles
+    
+    except Exception as e:
+        logging.exception(f"Error searching articles: {e}")
+        return []
+
 
 async def parse_rss_feed(rss_url: str, source_name: str = "Unknown"):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
@@ -700,7 +881,52 @@ async def update_feeds_config(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/feeds")
-async def feeds(days: int = Query(2, description="Number of days back to fetch articles for.", ge=1, le=30)):
+async def feeds(
+    days: int = Query(2, description="Number of days back to fetch articles for.", ge=1, le=30),
+    q: str = Query(None, description="Search query for articles"),
+    category: str = Query(None, description="Category filter for search"),
+    starred_only: bool = Query(False, description="Filter to show only starred articles")
+):
+    """
+    Get feeds with optional search and starred filter functionality.
+    
+    - If `q` is provided, performs a search (global or category-specific)
+    - If `q` and `category` are provided, searches within that category only
+    - If `starred_only` is true, filters to show only starred articles
+    - If neither is provided, returns standard feed view
+    """
+    
+    # Handle search queries
+    if q:
+        search_results = await search_articles(q, category=category)
+        
+        # Apply starred filter if requested
+        if starred_only:
+            search_results = [article for article in search_results if article.get('starred', False)]
+        
+        if category:
+            # Return results for specific category
+            return JSONResponse(content=[{
+                "category": category,
+                "feed_items": search_results
+            }])
+        else:
+            # Group results by category for global search
+            categories_dict = {}
+            for article in search_results:
+                cat = article['category']
+                if cat not in categories_dict:
+                    categories_dict[cat] = []
+                categories_dict[cat].append(article)
+            
+            categories_list = [
+                {"category": cat, "feed_items": articles}
+                for cat, articles in categories_dict.items()
+            ]
+            
+            return JSONResponse(content=categories_list)
+    
+    # Standard feed view (no search)
     conn = await get_db_connection()
     
     try:
@@ -708,15 +934,55 @@ async def feeds(days: int = Query(2, description="Number of days back to fetch a
         ordered_categories = [row['name'] for row in ordered_categories_rows]
             
         categories_list = []
-        for category in ordered_categories:
-            articles = await get_articles_for_category_db(category, days=days)
+        for cat in ordered_categories:
+            articles = await get_articles_for_category_db(cat, days=days, starred_only=starred_only)
             if articles:
-                categories_list.append({"category": category, "feed_items": articles})
+                categories_list.append({"category": cat, "feed_items": articles})
                 
         return JSONResponse(content=categories_list)
         
     finally:
         await conn.close()
+
+@app.post("/api/article/star")
+async def star_article(request: Request):
+    """Star or unstar an article."""
+    try:
+        body = await request.json()
+        link = body.get("link", "").strip()
+        starred = body.get("starred", False)
+        
+        if not link:
+            return JSONResponse({"error": "Article link is required"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Update the starred status
+            result = await conn.execute(
+                'UPDATE articles SET starred = $1 WHERE link = $2',
+                starred, link
+            )
+            
+            # Check if the article was found and updated
+            if result == 'UPDATE 0':
+                return JSONResponse({"error": "Article not found"}, status_code=404)
+            
+            return JSONResponse({
+                "message": "Article starred status updated successfully",
+                "link": link,
+                "starred": starred
+            })
+        
+        except asyncpg.PostgresError as e:
+            logging.exception("Database error updating starred status: %s", str(e))
+            return JSONResponse({"error": "Database error"}, status_code=500)
+        finally:
+            await conn.close()
+    
+    except Exception as e:
+        logging.exception("Error updating starred status: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/add-feed")
 async def add_feed(request: Request):
@@ -773,20 +1039,28 @@ async def add_feed(request: Request):
 async def article_full_text(url: str):
     try:
         conn = await get_db_connection()
-        content = await conn.fetchval('SELECT content FROM "YouTube-articles" WHERE link = $1', url)
+        content_html = await conn.fetchval('SELECT content FROM articles WHERE link = $1', url)
         await conn.close()
-        if content:
-            rendered_html = markdown2.markdown(content)
-            return JSONResponse({"content": rendered_html})
-        else:
+
+        if not content_html:
+            # Fallback to fetching live if not in DB
             a = await run_in_threadpool(lambda: Article(url, keep_article_html=True))
             await run_in_threadpool(a.download)
             await run_in_threadpool(a.parse)
             content_html = a.article_html.strip() if a.article_html else ""
-            if not content_html:
-                content_html = "<p>" + a.text.replace("\n", "</p><p>") + "</p>"
-            return JSONResponse({"content": content_html})
+            if not content_html and a.text:
+                # If no HTML, create basic paragraphs from text
+                content_html = "<p>" + a.text.replace('\n', '</p><p>') + "</p>"
+
+        if content_html:
+            # Format the article content for consistent, readable display
+            formatted_content = format_article_content(content_html)
+            return JSONResponse({"content": formatted_content})
+        else:
+            return JSONResponse({"content": "<p>No content could be extracted.</p>"})
+
     except Exception as e:
+        logging.exception(f"Error fetching full text for {url}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/article-full-html")
@@ -915,17 +1189,14 @@ async def home(request: Request):
 
 @app.get("/api/trends")
 async def trends(source: str = "reddit"):
-    if source == "twitter":
-        channels = []
-    else:
-        feeds = RSS_FEED_URLS.get(source, next(iter(RSS_FEED_URLS.values())))
-        channels = []
-        for feed in feeds:
-            items = await parse_rss_feed(feed["url"], feed["name"])
-            channels.append({"name": feed["name"], "feed_items": items})
-    
+    feeds = RSS_FEED_URLS.get(source, [])
+    channels = []
+    for feed in feeds:
+        items = await parse_rss_feed(feed["url"], feed["name"])
+        channels.append({"name": feed["name"], "feed_items": items})
+
     response_data = {"source": source, "channels": channels}
     if source == "twitter":
         response_data["nitter_url"] = Config.NITTER_URL
-        
+
     return JSONResponse(content=response_data)
