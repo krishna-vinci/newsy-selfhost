@@ -1,7 +1,7 @@
 <script lang="ts">
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
-import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star } from '@lucide/svelte';
+import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
 import Button from '$lib/components/ui/button/index.svelte';
 import Badge from '$lib/components/ui/badge/index.svelte';
@@ -44,6 +44,7 @@ let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 let searchResults = $state<Category[]>([]);
 let isSearchMode = $state<boolean>(false);
 let isStarredViewActive = $state<boolean>(false);
+let isGeneratingReport = $state<boolean>(false);
 
 // Derived
 const categories = $derived(data.categories as Category[] || []);
@@ -247,6 +248,36 @@ function handleKeydown(event: KeyboardEvent) {
 		}
 	}
 
+// Generate starred report for current category
+async function generateStarredReport() {
+	if (selectedCategory === 'all') {
+		toast.error('Please select a specific category to generate a report');
+		return;
+	}
+	
+	isGeneratingReport = true;
+	
+	try {
+		const response = await fetch(`/api/reports/generate/starred/${encodeURIComponent(selectedCategory)}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' }
+		});
+		
+		if (!response.ok) {
+			const error = await response.json();
+			throw new Error(error.detail || 'Failed to generate report');
+		}
+		
+		const result = await response.json();
+		toast.success(`Report generated successfully! ${result.article_count} articles included.`);
+	} catch (error) {
+		console.error('Error generating report:', error);
+		toast.error(error instanceof Error ? error.message : 'Failed to generate report');
+	} finally {
+		isGeneratingReport = false;
+	}
+}
+
 // Initialize column view
 $effect(() => {
 if (viewMode === 'column' && filteredArticles.length > 0) {
@@ -309,6 +340,20 @@ loadArticleContent(filteredArticles[0].link);
 					</button>
 				{/if}
 			</div>
+
+			<!-- Generate Report Button (only show for specific category) -->
+			{#if selectedCategory !== 'all'}
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={generateStarredReport}
+					disabled={isGeneratingReport}
+					aria-label="Generate starred report"
+				>
+					<FileText class="size-4 mr-2" />
+					{isGeneratingReport ? 'Generating...' : 'Generate Report'}
+				</Button>
+			{/if}
 
 			<!-- Starred View Toggle -->
 			<Button
