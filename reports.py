@@ -39,6 +39,8 @@ class ReportSchedule(BaseModel):
     id: Optional[int] = None
     category: str = Field(..., min_length=1, max_length=100)
     schedule_type: str = Field(..., pattern="^(daily|weekly)$")
+    schedule_hour: int = Field(default=0, ge=0, le=23)
+    schedule_minute: int = Field(default=0, ge=0, le=59)
     enabled: bool = True
 
 
@@ -77,6 +79,8 @@ async def init_reports_db():
                 id SERIAL PRIMARY KEY,
                 category TEXT NOT NULL,
                 schedule_type TEXT NOT NULL CHECK (schedule_type IN ('daily', 'weekly')),
+                schedule_hour INTEGER DEFAULT 0 CHECK (schedule_hour >= 0 AND schedule_hour < 24),
+                schedule_minute INTEGER DEFAULT 0 CHECK (schedule_minute >= 0 AND schedule_minute < 60),
                 enabled BOOLEAN DEFAULT true,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -84,6 +88,22 @@ async def init_reports_db():
             );
         """)
         logging.info("Report schedules table initialized")
+        
+        # Add columns if they don't exist (for existing databases)
+        try:
+            await conn.execute("""
+                ALTER TABLE report_schedules
+                ADD COLUMN IF NOT EXISTS schedule_hour INTEGER DEFAULT 0 CHECK (schedule_hour >= 0 AND schedule_hour < 24);
+            """)
+            await conn.execute("""
+                ALTER TABLE report_schedules
+                ADD COLUMN IF NOT EXISTS schedule_minute INTEGER DEFAULT 0 CHECK (schedule_minute >= 0 AND schedule_minute < 60);
+            """)
+            logging.info("Added schedule_hour and schedule_minute columns to report_schedules table")
+        except Exception as e:
+            # Columns might already exist
+            logging.debug(f"Columns may already exist: {e}")
+    
     except Exception as e:
         logging.error(f"Error initializing report_schedules table: {e}")
         raise
@@ -337,13 +357,15 @@ async def load_and_schedule_reports(scheduler):
     conn = await get_db_connection()
     try:
         schedules = await conn.fetch(
-            "SELECT id, category, schedule_type FROM report_schedules WHERE enabled = true"
+            "SELECT id, category, schedule_type, schedule_hour, schedule_minute FROM report_schedules WHERE enabled = true"
         )
         
         for schedule in schedules:
             schedule_id = schedule['id']
             category = schedule['category']
             schedule_type = schedule['schedule_type']
+            schedule_hour = schedule.get('schedule_hour', 0) or 0
+            schedule_minute = schedule.get('schedule_minute', 0) or 0
             
             job_id = f"report_{schedule_type}_{category}_{schedule_id}"
             
@@ -353,31 +375,31 @@ async def load_and_schedule_reports(scheduler):
             
             # Add job based on schedule type
             if schedule_type == "daily":
-                # Run daily at midnight
+                # Run daily at specified time
                 scheduler.add_job(
                     execute_scheduled_report,
                     'cron',
-                    hour=0,
-                    minute=0,
+                    hour=schedule_hour,
+                    minute=schedule_minute,
                     args=[category, schedule_type],
                     id=job_id,
                     replace_existing=True
                 )
-                logging.info(f"Scheduled daily report for {category}")
+                logging.info(f"Scheduled daily report for {category} at {schedule_hour:02d}:{schedule_minute:02d}")
             
             elif schedule_type == "weekly":
-                # Run weekly on Monday at midnight
+                # Run weekly on Monday at specified time
                 scheduler.add_job(
                     execute_scheduled_report,
                     'cron',
                     day_of_week='mon',
-                    hour=0,
-                    minute=0,
+                    hour=schedule_hour,
+                    minute=schedule_minute,
                     args=[category, schedule_type],
                     id=job_id,
                     replace_existing=True
                 )
-                logging.info(f"Scheduled weekly report for {category}")
+                logging.info(f"Scheduled weekly report for {category} at {schedule_hour:02d}:{schedule_minute:02d}")
         
         logging.info(f"Loaded {len(schedules)} report schedules")
     
@@ -414,7 +436,7 @@ async def get_schedules():
     try:
         schedules = await conn.fetch(
             """
-            SELECT id, category, schedule_type, enabled, created_at, updated_at
+            SELECT id, category, schedule_type, schedule_hour, schedule_minute, enabled, created_at, updated_at
             FROM report_schedules
             ORDER BY category, schedule_type
             """
@@ -424,6 +446,8 @@ async def get_schedules():
                 "id": s['id'],
                 "category": s['category'],
                 "schedule_type": s['schedule_type'],
+                "schedule_hour": s.get('schedule_hour', 0) or 0,
+                "schedule_minute": s.get('schedule_minute', 0) or 0,
                 "enabled": s['enabled'],
                 "created_at": s['created_at'].isoformat() if s['created_at'] else None,
                 "updated_at": s['updated_at'].isoformat() if s['updated_at'] else None
@@ -461,11 +485,11 @@ async def create_schedule(schedule: ReportSchedule):
         # Insert schedule
         schedule_id = await conn.fetchval(
             """
-            INSERT INTO report_schedules (category, schedule_type, enabled)
-            VALUES ($1, $2, $3)
+            INSERT INTO report_schedules (category, schedule_type, schedule_hour, schedule_minute, enabled)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING id
             """,
-            schedule.category, schedule.schedule_type, schedule.enabled
+            schedule.category, schedule.schedule_type, schedule.schedule_hour, schedule.schedule_minute, schedule.enabled
         )
         
         # Reload schedules
@@ -476,7 +500,9 @@ async def create_schedule(schedule: ReportSchedule):
             "message": "Schedule created successfully",
             "id": schedule_id,
             "category": schedule.category,
-            "schedule_type": schedule.schedule_type
+            "schedule_type": schedule.schedule_type,
+            "schedule_hour": schedule.schedule_hour,
+            "schedule_minute": schedule.schedule_minute
         })
     
     except HTTPException:
@@ -505,10 +531,10 @@ async def update_schedule(schedule_id: int, schedule: ReportSchedule):
         await conn.execute(
             """
             UPDATE report_schedules
-            SET category = $1, schedule_type = $2, enabled = $3, updated_at = NOW()
-            WHERE id = $4
+            SET category = $1, schedule_type = $2, schedule_hour = $3, schedule_minute = $4, enabled = $5, updated_at = NOW()
+            WHERE id = $6
             """,
-            schedule.category, schedule.schedule_type, schedule.enabled, schedule_id
+            schedule.category, schedule.schedule_type, schedule.schedule_hour, schedule.schedule_minute, schedule.enabled, schedule_id
         )
         
         # Reload schedules

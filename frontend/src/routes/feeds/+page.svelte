@@ -3,6 +3,7 @@ import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
 import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
+import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import Button from '$lib/components/ui/button/index.svelte';
 import Badge from '$lib/components/ui/badge/index.svelte';
 import Separator from '$lib/components/ui/separator/index.svelte';
@@ -24,6 +25,7 @@ import FeedSidebar from '$lib/components/FeedSidebar.svelte';
 		published_datetime: string;
 		source: string;
 		starred: boolean;
+		category: string;
 	};
 	type Category = {
 		category: string;
@@ -46,17 +48,31 @@ let isSearchMode = $state<boolean>(false);
 let isStarredViewActive = $state<boolean>(false);
 let isGeneratingReport = $state<boolean>(false);
 
+// Pagination state
+let allArticles = $state<FeedItem[]>([]);
+let currentOffset = $state<number>(0);
+let hasMore = $state<boolean>(true);
+let isLoadingMore = $state<boolean>(false);
+let totalArticles = $state<number>(0);
+const INITIAL_LOAD = 100;
+const LOAD_MORE_SIZE = 50;
+
 // Derived
 const categories = $derived(data.categories as Category[] || []);
 
 // Use search results if in search mode, otherwise use original categories
 const displayCategories = $derived(isSearchMode ? searchResults : categories);
 
+// Use paginated articles if available, otherwise fall back to category-grouped data
 const filteredArticles = $derived(
-		selectedCategory === 'all'
+	allArticles.length > 0 
+		? (selectedCategory === 'all' 
+			? allArticles 
+			: allArticles.filter(article => article.category === selectedCategory))
+		: (selectedCategory === 'all'
 			? displayCategories.flatMap(cat => cat.feed_items)
-			: displayCategories.find(cat => cat.category === selectedCategory)?.feed_items || []
-	);
+			: displayCategories.find(cat => cat.category === selectedCategory)?.feed_items || [])
+);
 
 // Total search result count (only relevant when searching)
 const searchResultCount = $derived(
@@ -64,30 +80,6 @@ const searchResultCount = $derived(
 );
 
 	// Functions
-	function copyToClipboard(url: string) {
-		if (navigator.clipboard && window.isSecureContext) {
-			navigator.clipboard.writeText(url)
-				.then(() => toast.success('Link copied to clipboard!'))
-				.catch(() => toast.error('Failed to copy link'));
-		} else {
-			// Fallback for non-secure contexts
-			const textArea = document.createElement('textarea');
-			textArea.value = url;
-			textArea.style.position = 'absolute';
-			textArea.style.left = '-9999px';
-			document.body.appendChild(textArea);
-			textArea.select();
-			try {
-				document.execCommand('copy');
-				toast.success('Link copied to clipboard!');
-			} catch (err) {
-				toast.error('Failed to copy link');
-			} finally {
-				document.body.removeChild(textArea);
-			}
-		}
-	}
-
 	async function loadArticleContent(url: string) {
 		isLoadingContent = true;
 		articleContent = '';
@@ -113,11 +105,9 @@ const searchResultCount = $derived(
 	}
 
 function handleCategorySelect(category: string) {
-selectedCategory = category;
-// Re-fetch data with current filters (search, starred, etc.)
-if (searchQuery.trim() || isStarredViewActive) {
-	fetchFeedsData();
-}
+	selectedCategory = category;
+	// Load initial articles with pagination
+	loadInitialArticles();
 }
 
 async function handleConfigChanged() {
@@ -126,18 +116,15 @@ await invalidateAll();
 
 async function performSearch(query: string) {
 	if (!query.trim()) {
-		// Clear search - but keep starred view if active
-		isSearchMode = isStarredViewActive;
+		// Clear search - reload initial articles
+		isSearchMode = false;
 		searchResults = [];
-		if (!isStarredViewActive) {
-			await invalidateAll();
-		} else {
-			await fetchFeedsData();
-		}
+		await loadInitialArticles();
 		return;
 	}
 	
-	await fetchFeedsData();
+	// Reload with search query
+	await loadInitialArticles();
 }
 
 function handleSearchInput(event: Event) {
@@ -156,19 +143,74 @@ function handleSearchInput(event: Event) {
 
 async function clearSearch() {
 	searchQuery = '';
-	// Keep starred view active if it was on
-	if (isStarredViewActive) {
-		await fetchFeedsData();
-	} else {
-		isSearchMode = false;
-		searchResults = [];
-		await invalidateAll();
-	}
+	isSearchMode = false;
+	searchResults = [];
+	await loadInitialArticles();
 }
 
 async function toggleStarredView() {
 	isStarredViewActive = !isStarredViewActive;
-	await fetchFeedsData();
+	await loadInitialArticles();
+}
+
+async function loadInitialArticles() {
+	// Reset pagination state
+	currentOffset = 0;
+	allArticles = [];
+	hasMore = true;
+	
+	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
+	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
+	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	
+	try {
+		const response = await fetch(`/api/feeds?days=2&limit=${INITIAL_LOAD}&offset=0${categoryParam}${searchParam}${starredParam}`);
+		if (!response.ok) throw new Error('Failed to fetch feeds');
+		
+		const data = await response.json();
+		
+		// Check if response is paginated format
+		if (data.articles && Array.isArray(data.articles)) {
+			allArticles = data.articles;
+			totalArticles = data.total;
+			hasMore = data.has_more;
+			currentOffset = INITIAL_LOAD;
+		} else {
+			// Fallback to old format (shouldn't happen with limit param)
+			console.warn('Unexpected response format');
+		}
+	} catch (error) {
+		console.error('Error loading articles:', error);
+		toast.error('Failed to load articles');
+	}
+}
+
+async function loadMoreArticles() {
+	if (isLoadingMore || !hasMore) return;
+	
+	isLoadingMore = true;
+	
+	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
+	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
+	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	
+	try {
+		const response = await fetch(`/api/feeds?days=2&limit=${LOAD_MORE_SIZE}&offset=${currentOffset}${categoryParam}${searchParam}${starredParam}`);
+		if (!response.ok) throw new Error('Failed to fetch more articles');
+		
+		const data = await response.json();
+		
+		if (data.articles && Array.isArray(data.articles)) {
+			allArticles = [...allArticles, ...data.articles];
+			hasMore = data.has_more;
+			currentOffset += data.articles.length;
+		}
+	} catch (error) {
+		console.error('Error loading more articles:', error);
+		toast.error('Failed to load more articles');
+	} finally {
+		isLoadingMore = false;
+	}
 }
 
 async function fetchFeedsData() {
@@ -280,10 +322,45 @@ async function generateStarredReport() {
 
 // Initialize column view
 $effect(() => {
-if (viewMode === 'column' && filteredArticles.length > 0) {
-selectedColumnIndex = 0;
-loadArticleContent(filteredArticles[0].link);
-}
+	if (viewMode === 'column' && filteredArticles.length > 0) {
+		selectedColumnIndex = 0;
+		loadArticleContent(filteredArticles[0].link);
+	}
+});
+
+// Load initial articles on mount (run once)
+let hasInitiallyLoaded = false;
+$effect(() => {
+	if (!hasInitiallyLoaded) {
+		hasInitiallyLoaded = true;
+		loadInitialArticles();
+	}
+});
+
+// Intersection Observer for lazy loading
+$effect(() => {
+	const trigger = document.querySelector('.load-more-trigger');
+	if (!trigger) return;
+	
+	const observer = new IntersectionObserver(
+		(entries) => {
+			const entry = entries[0];
+			if (entry.isIntersecting && hasMore && !isLoadingMore) {
+				loadMoreArticles();
+			}
+		},
+		{
+			root: null,
+			rootMargin: '200px', // Start loading 200px before reaching the trigger
+			threshold: 0.1
+		}
+	);
+	
+	observer.observe(trigger);
+	
+	return () => {
+		observer.disconnect();
+	};
 });
 </script>
 
@@ -295,14 +372,15 @@ loadArticleContent(filteredArticles[0].link);
 
 <svelte:window onkeydown={handleKeydown} />
 
-<Sidebar.Provider>
-<div class="flex min-h-screen w-full">
+<Sidebar.Provider class="h-full">
+<div class="flex w-full h-full">
 <!-- Sidebar -->
 <FeedSidebar {selectedCategory} onCategorySelect={handleCategorySelect} onconfigchanged={handleConfigChanged} />
 
 <!-- Main Content -->
-<Sidebar.Inset>
-<div class="w-full px-8 py-8">
+<Sidebar.Inset class="h-full">
+<div class="w-full h-full overflow-auto">
+<div class="px-8 py-8">
 <!-- Header -->
 <div class="mb-8 flex flex-col gap-4">
 	<div class="flex items-center justify-between gap-4">
@@ -469,7 +547,7 @@ loadArticleContent(filteredArticles[0].link);
 								<Button
 									variant="outline"
 									size="icon-sm"
-									onclick={() => copyToClipboard(article.link)}
+									onclick={() => copyToClipboard(article.link, 'Link copied to clipboard!')}
 								>
 									<Copy class="size-4" />
 								</Button>
@@ -478,6 +556,26 @@ loadArticleContent(filteredArticles[0].link);
 					</div>
 				</Card>
 			{/each}
+		</div>
+		
+		<!-- Load More Trigger for Card View -->
+		<div class="load-more-trigger">
+			{#if hasMore || isLoadingMore}
+				<div class="flex justify-center py-8">
+					{#if isLoadingMore}
+						<div class="flex items-center gap-2 text-muted-foreground">
+							<div class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent"></div>
+							<span>Loading more articles...</span>
+						</div>
+					{:else}
+						<span class="text-sm text-muted-foreground">Scroll for more</span>
+					{/if}
+				</div>
+			{:else if allArticles.length > 0}
+				<div class="flex justify-center py-8">
+					<span class="text-sm text-muted-foreground">No more articles</span>
+				</div>
+			{/if}
 		</div>
 	{:else if viewMode === 'headline'}
 		<!-- Headline View -->
@@ -512,7 +610,7 @@ loadArticleContent(filteredArticles[0].link);
 							<Button
 								variant="ghost"
 								size="icon-sm"
-								onclick={() => copyToClipboard(article.link)}
+								onclick={() => copyToClipboard(article.link, 'Link copied to clipboard!')}
 							>
 								<Copy class="size-4" />
 							</Button>
@@ -520,6 +618,26 @@ loadArticleContent(filteredArticles[0].link);
 					</li>
 				{/each}
 			</ul>
+		</div>
+		
+		<!-- Load More Trigger for Headline View -->
+		<div class="load-more-trigger">
+			{#if hasMore || isLoadingMore}
+				<div class="flex justify-center py-8">
+					{#if isLoadingMore}
+						<div class="flex items-center gap-2 text-muted-foreground">
+							<div class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent"></div>
+							<span>Loading more articles...</span>
+						</div>
+					{:else}
+						<span class="text-sm text-muted-foreground">Scroll for more</span>
+					{/if}
+				</div>
+			{:else if allArticles.length > 0}
+				<div class="flex justify-center py-8">
+					<span class="text-sm text-muted-foreground">No more articles</span>
+				</div>
+			{/if}
 		</div>
 	{:else if viewMode === 'column'}
 		<!-- Column View -->
@@ -563,6 +681,26 @@ loadArticleContent(filteredArticles[0].link);
 						</div>
 					</Card>
 				{/each}
+				
+				<!-- Load More Trigger for Column View -->
+				<div class="load-more-trigger">
+					{#if hasMore || isLoadingMore}
+						<div class="flex justify-center py-4">
+							{#if isLoadingMore}
+								<div class="flex items-center gap-2 text-muted-foreground">
+									<div class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent"></div>
+									<span>Loading more...</span>
+								</div>
+							{:else}
+								<span class="text-sm text-muted-foreground">Scroll for more</span>
+							{/if}
+						</div>
+					{:else if allArticles.length > 0}
+						<div class="flex justify-center py-4">
+							<span class="text-sm text-muted-foreground">No more articles</span>
+						</div>
+					{/if}
+				</div>
 			</div>
 
 			<!-- Article Content -->
@@ -594,7 +732,7 @@ loadArticleContent(filteredArticles[0].link);
 									<Button
 										variant="outline"
 										size="icon-sm"
-										onclick={() => copyToClipboard(filteredArticles[selectedColumnIndex].link)}
+										onclick={() => copyToClipboard(filteredArticles[selectedColumnIndex].link, 'Link copied to clipboard!')}
 									>
 										<Copy class="size-4" />
 									</Button>
@@ -620,6 +758,7 @@ loadArticleContent(filteredArticles[0].link);
 		</div>
 	{/if}
 </div>
+</div>
 </Sidebar.Inset>
 </div>
 </Sidebar.Provider>
@@ -635,7 +774,7 @@ loadArticleContent(filteredArticles[0].link);
 					<Button
 						variant="outline"
 						size="sm"
-						onclick={() => copyToClipboard(selectedArticle!.link)}
+						onclick={() => copyToClipboard(selectedArticle!.link, 'Link copied to clipboard!')}
 					>
 						<Copy class="size-4" />
 						Copy Link
