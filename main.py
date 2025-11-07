@@ -158,7 +158,8 @@ async def init_db():
         id SERIAL PRIMARY KEY,
         name TEXT UNIQUE NOT NULL,
         priority INTEGER DEFAULT 0,
-        is_default BOOLEAN DEFAULT false
+        is_default BOOLEAN DEFAULT false,
+        ntfy_enabled BOOLEAN DEFAULT true
     );
     """)
     await conn.execute("""
@@ -194,6 +195,15 @@ async def init_db():
          last_update TIMESTAMPTZ
     );
     """)
+    
+    # Add ntfy_enabled column if it doesn't exist (migration for existing databases)
+    try:
+        await conn.execute("""
+        ALTER TABLE categories ADD COLUMN ntfy_enabled BOOLEAN DEFAULT true;
+        """)
+    except Exception:
+        # Column already exists, ignore
+        pass
     
     # Check if feeds table is empty to perform initial population
     if await conn.fetchval("SELECT COUNT(*) FROM feeds") == 0:
@@ -311,6 +321,19 @@ def sanitize_text(text):
     return normalized.encode('latin1', 'ignore').decode('latin1')
 
 async def send_ntfy_notification(title: str, link: str, description: str, category: str, source: str):
+    # Check if ntfy is enabled for this category
+    try:
+        conn = await get_db_connection()
+        ntfy_enabled = await conn.fetchval("SELECT ntfy_enabled FROM categories WHERE name = $1", category)
+        await conn.close()
+        
+        if ntfy_enabled is False:
+            logging.debug(f"Ntfy notifications disabled for category: {category}")
+            return
+    except Exception as e:
+        logging.warning(f"Could not check ntfy status for category {category}: {e}")
+        # Continue with sending notification if we can't check status
+    
     title = sanitize_text(title)
     topic = f"feeds-{category.lower().replace(' ', '-')}"
     ntfy_url = f"{NTFY_BASE_URL}/{topic}"
@@ -531,7 +554,56 @@ async def fetch_all_feeds_db():
         logging.info("Feed update completed at %s", end_time)
 
 
-async def get_articles_for_category_db(category: str, days: int = 2, starred_only: bool = False):
+async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None):
+    """Get total count of articles for pagination"""
+    threshold = datetime.now(IST) - timedelta(days=days)
+    conn = await get_db_connection()
+    
+    try:
+        if search_query:
+            # For search, we need to count search results
+            # This is a simplified count - actual search might be more complex
+            query = """
+                SELECT COUNT(*) as total
+                FROM articles a
+                JOIN feeds f ON a.feed_id = f.id
+                WHERE a.published_datetime >= $1
+                AND f."isActive" = true
+                AND (a.title ILIKE $2 OR a.description ILIKE $2 OR a.content ILIKE $2)
+            """
+            params = [threshold, f"%{search_query}%"]
+            
+            if category:
+                query = query.replace("AND (a.title", "AND a.category = $3 AND (a.title")
+                params.append(category)
+                
+            if starred_only:
+                query += " AND a.starred = true"
+        else:
+            # Standard count
+            query = """
+                SELECT COUNT(*) as total
+                FROM articles a
+                JOIN feeds f ON a.feed_id = f.id
+                WHERE a.published_datetime >= $1
+                AND f."isActive" = true
+            """
+            params = [threshold]
+            
+            if category:
+                query += " AND a.category = $2"
+                params.append(category)
+                
+            if starred_only:
+                query += " AND a.starred = true"
+        
+        result = await conn.fetchrow(query, *params)
+        return result['total'] if result else 0
+    finally:
+        await conn.close()
+
+
+async def get_articles_for_category_db(category: str, days: int = 2, starred_only: bool = False, limit: int = None, offset: int = None):
      threshold = datetime.now(IST) - timedelta(days=days)
      conn = await get_db_connection()
      
@@ -550,6 +622,15 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
          query += " AND a.starred = true"
      
      query += " ORDER BY a.published_datetime DESC"
+     
+     # Add pagination if limit is provided
+     if limit is not None:
+         query += f" LIMIT ${len(params) + 1}"
+         params.append(limit)
+         
+         if offset is not None:
+             query += f" OFFSET ${len(params) + 1}"
+             params.append(offset)
      
      rows = await conn.fetch(query, *params)
      
@@ -574,6 +655,56 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
      return articles
 
 
+async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, limit: int = 100, offset: int = 0, category: str = None):
+    """Get articles across all categories with pagination"""
+    threshold = datetime.now(IST) - timedelta(days=days)
+    conn = await get_db_connection()
+    
+    try:
+        query = """
+            SELECT a.title, a.link, a.description, a.thumbnail, a.published, a.published_datetime, a.category, a.content, a.source, a.starred 
+            FROM articles a
+            JOIN feeds f ON a.feed_id = f.id
+            WHERE a.published_datetime >= $1
+            AND f."isActive" = true
+        """
+        
+        params = [threshold]
+        
+        if category:
+            query += " AND a.category = $2"
+            params.append(category)
+        
+        if starred_only:
+            query += f" AND a.starred = true"
+        
+        query += " ORDER BY a.published_datetime DESC"
+        query += f" LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params.extend([limit, offset])
+        
+        rows = await conn.fetch(query, *params)
+        
+        articles = []
+        for row in rows:
+            pub_dt = row['published_datetime']
+            pub_dt_str = pub_dt.isoformat() if pub_dt else None
+            
+            articles.append({
+                "title": row['title'],
+                "link": row['link'],
+                "description": row['description'],
+                "thumbnail": row['thumbnail'],
+                "published": row['published'],
+                "published_datetime": pub_dt_str,
+                "category": row['category'],
+                "content": row['content'],
+                "source": row['source'] or "Unknown",
+                "starred": row['starred']
+            })
+        
+        return articles
+    finally:
+        await conn.close()
 
 
 async def cleanup_old_articles():
@@ -606,7 +737,7 @@ async def cleanup_old_articles():
         logging.info("Finished scheduled cleanup of old articles.")
 
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone=IST)
 
 # Global Redis client for search index
 redis_client = None
@@ -851,8 +982,8 @@ async def get_feeds_config():
         
     feeds_config = {}
     for category_name in ordered_categories:
-        if category_name in feeds_by_category:
-            feeds_config[category_name] = feeds_by_category[category_name]
+        # Include all categories, even if they have no feeds
+        feeds_config[category_name] = feeds_by_category.get(category_name, [])
 
     await conn.close()
     return JSONResponse(content=feeds_config)
@@ -895,18 +1026,60 @@ async def feeds(
     days: int = Query(2, description="Number of days back to fetch articles for.", ge=1, le=30),
     q: str = Query(None, description="Search query for articles"),
     category: str = Query(None, description="Category filter for search"),
-    starred_only: bool = Query(False, description="Filter to show only starred articles")
+    starred_only: bool = Query(False, description="Filter to show only starred articles"),
+    limit: int = Query(None, description="Number of articles to return (for pagination)", ge=1, le=500),
+    offset: int = Query(None, description="Number of articles to skip (for pagination)", ge=0)
 ):
     """
-    Get feeds with optional search and starred filter functionality.
+    Get feeds with optional search, starred filter, and pagination functionality.
     
     - If `q` is provided, performs a search (global or category-specific)
     - If `q` and `category` are provided, searches within that category only
     - If `starred_only` is true, filters to show only starred articles
-    - If neither is provided, returns standard feed view
+    - If `limit` and `offset` are provided, returns paginated results with metadata
+    - If neither is provided, returns standard feed view grouped by category
     """
     
-    # Handle search queries
+    # Paginated mode - returns flat list with metadata
+    if limit is not None:
+        offset = offset or 0
+        
+        # Get paginated articles
+        articles = await get_all_articles_paginated(
+            days=days,
+            starred_only=starred_only,
+            limit=limit,
+            offset=offset,
+            category=category
+        )
+        
+        # Apply search filter if provided
+        if q:
+            search_results = await search_articles(q, category=category)
+            if starred_only:
+                search_results = [article for article in search_results if article.get('starred', False)]
+            
+            # Paginate search results
+            articles = search_results[offset:offset + limit]
+            total_count = len(search_results)
+        else:
+            # Get total count
+            total_count = await get_total_articles_count(
+                category=category,
+                days=days,
+                starred_only=starred_only,
+                search_query=q
+            )
+        
+        return JSONResponse(content={
+            "articles": articles,
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(articles)) < total_count
+        })
+    
+    # Handle search queries (non-paginated)
     if q:
         search_results = await search_articles(q, category=category)
         
@@ -936,7 +1109,7 @@ async def feeds(
             
             return JSONResponse(content=categories_list)
     
-    # Standard feed view (no search)
+    # Standard feed view (no search, no pagination) - grouped by category
     conn = await get_db_connection()
     
     try:
@@ -1127,8 +1300,8 @@ async def delete_feed(feed_id: int):
 async def get_categories():
     """Get all categories, ordered by priority."""
     conn = await get_db_connection()
-    rows = await conn.fetch("SELECT id, name, priority, is_default FROM categories ORDER BY priority")
-    categories = [{"id": row['id'], "name": row['name'], "priority": row['priority'], "is_default": row['is_default']} for row in rows]
+    rows = await conn.fetch("SELECT id, name, priority, is_default, ntfy_enabled FROM categories ORDER BY priority")
+    categories = [{"id": row['id'], "name": row['name'], "priority": row['priority'], "is_default": row['is_default'], "ntfy_enabled": row['ntfy_enabled']} for row in rows]
     await conn.close()
     return JSONResponse(content=categories)
 
@@ -1157,6 +1330,22 @@ async def set_default_category(category_id: int):
         return JSONResponse({"message": "Default category updated."})
     except Exception as e:
         logging.error(f"Error setting default category: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/category/{category_id}/ntfy")
+async def toggle_category_ntfy(category_id: int, request: Request):
+    """Toggle ntfy notifications for a category."""
+    try:
+        body = await request.json()
+        ntfy_enabled = body.get("ntfy_enabled", True)
+        
+        conn = await get_db_connection()
+        await conn.execute("UPDATE categories SET ntfy_enabled = $1 WHERE id = $2", ntfy_enabled, category_id)
+        await conn.close()
+        
+        return JSONResponse({"message": f"Ntfy notifications {'enabled' if ntfy_enabled else 'disabled'} for category."})
+    except Exception as e:
+        logging.error(f"Error toggling category ntfy: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/category/{category_id}")

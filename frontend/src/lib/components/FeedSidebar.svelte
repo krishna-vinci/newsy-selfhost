@@ -1,12 +1,15 @@
 <script lang="ts">
 import { onMount } from 'svelte';
+import { goto } from '$app/navigation';
 import { toast } from 'svelte-sonner';
+import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 import Button from '$lib/components/ui/button/index.svelte';
 import Input from '$lib/components/ui/input/index.svelte';
 import Checkbox from '$lib/components/ui/checkbox/index.svelte';
 import * as Select from '$lib/components/ui/select/index.js';
-import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText } from '@lucide/svelte';
+import * as Switch from '$lib/components/ui/switch/index.ts';
+import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy } from '@lucide/svelte';
 import { dndzone } from 'svelte-dnd-action';
 
 
@@ -24,6 +27,7 @@ type Category = {
 	name: string;
 	priority: number;
 	is_default: boolean;
+	ntfy_enabled: boolean;
 };
 
 type FeedConfig = Record<string, Feed[]>;
@@ -318,6 +322,27 @@ async function deleteCategory(categoryId: number) {
 	}
 }
 
+async function toggleCategoryNtfy(category: Category) {
+	const previousEnabled = category.ntfy_enabled;
+	category.ntfy_enabled = !category.ntfy_enabled;
+	
+	try {
+		const response = await fetch(`/api/category/${category.id}/ntfy`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				ntfy_enabled: category.ntfy_enabled
+			})
+		});
+		
+		if (!response.ok) throw new Error('Failed to update ntfy setting');
+		toast.success(category.ntfy_enabled ? 'Ntfy notifications enabled' : 'Ntfy notifications disabled');
+	} catch (error) {
+		category.ntfy_enabled = previousEnabled;
+		toast.error('Failed to update ntfy setting');
+	}
+}
+
 
 function handleCategoryClick(category: string) {
 	onCategorySelect(category);
@@ -344,7 +369,7 @@ onMount(() => {
 				</Sidebar.MenuItem>
 				<Sidebar.MenuItem>
 					<Sidebar.MenuButton
-						href="/reports"
+						onclick={() => goto('/reports')}
 					>
 						<FileText class="mr-2 h-4 w-4" />
 						<span>Reports</span>
@@ -600,7 +625,7 @@ onMount(() => {
 			if (e.target === e.currentTarget) closeCategorySettings();
 		}}
 	>
-		<div class="w-full max-w-lg rounded-lg bg-card p-6 shadow-lg">
+		<div class="w-full max-w-5xl rounded-lg bg-card p-6 shadow-lg">
 			<h3 class="mb-4 text-lg font-semibold">Manage Categories</h3>
 
 			<div
@@ -610,26 +635,54 @@ onMount(() => {
 				onfinalize={handleDndFinalize}
 			>
 				{#each categoriesList as category (category.id)}
-					<div
-						class="mb-2 flex items-center gap-2 rounded-md bg-background p-2"
-					>
-						<GripVertical class="h-5 w-5 cursor-grab text-muted-foreground" />
-						<span class="flex-1 font-medium">{category.name}</span>
-						<Button
-							variant={category.is_default ? 'secondary' : 'ghost'}
-							size="sm"
-							onclick={() => setDefaultCategory(category.id)}
-						>
-							{category.is_default ? 'Default' : 'Set Default'}
-						</Button>
-						<Button
-							variant="ghost"
-							size="icon"
-							class="h-8 w-8"
-							onclick={() => deleteCategory(category.id)}
-						>
-							<Trash2 class="h-4 w-4" />
-						</Button>
+					{@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
+					<div class="mb-3 rounded-md bg-background p-3 border border-border">
+						<div class="flex items-center gap-4">
+							<GripVertical class="h-5 w-5 cursor-grab text-muted-foreground flex-shrink-0" />
+							<span class="font-medium flex-grow min-w-0 truncate">{category.name}</span>
+
+							<div class="flex items-center justify-between gap-2 w-[320px] flex-shrink-0">
+								<span class="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded truncate">
+									{topicName}
+								</span>
+								<Button
+									variant="ghost"
+									size="icon"
+									class="h-6 w-6"
+									onclick={() => copyToClipboard(topicName, 'Topic copied to clipboard')}
+								>
+									<Copy class="h-3 w-3" />
+								</Button>
+							</div>
+
+							<div class="flex items-center gap-2 w-[120px] flex-shrink-0">
+								<Bell class="h-4 w-4 text-muted-foreground" />
+								<Switch.Switch
+									checked={category.ntfy_enabled}
+									onCheckedChange={() => toggleCategoryNtfy(category)}
+								/>
+								<span class="text-xs text-muted-foreground w-6">{category.ntfy_enabled ? 'On' : 'Off'}</span>
+							</div>
+
+							<div class="flex items-center gap-2 w-[180px] flex-shrink-0 justify-end">
+								<Button
+									variant={category.is_default ? 'secondary' : 'ghost'}
+									size="sm"
+									class="text-xs"
+									onclick={() => setDefaultCategory(category.id)}
+								>
+									{category.is_default ? 'Default' : 'Set Default'}
+								</Button>
+								<Button
+									variant="ghost"
+									size="icon"
+									class="h-8 w-8 flex-shrink-0"
+									onclick={() => deleteCategory(category.id)}
+								>
+									<Trash2 class="h-4 w-4" />
+								</Button>
+							</div>
+						</div>
 					</div>
 				{/each}
 			</div>
