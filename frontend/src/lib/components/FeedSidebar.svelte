@@ -9,8 +9,10 @@ import Input from '$lib/components/ui/input/index.svelte';
 import Checkbox from '$lib/components/ui/checkbox/index.svelte';
 import * as Select from '$lib/components/ui/select/index.js';
 import * as Switch from '$lib/components/ui/switch/index.ts';
+import * as Tabs from '$lib/components/ui/tabs/index.js';
 import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy } from '@lucide/svelte';
 import { dndzone } from 'svelte-dnd-action';
+import { settings } from '$lib/stores/settings';
 
 
 type Feed = {
@@ -58,6 +60,11 @@ let editingFeedCategory = $state('');
 // Category settings modal state
 let showCategorySettingsModal = $state(false);
 let categoriesList = $state<Category[]>([]);
+let canCloseModal = $state(true);
+let activeTab = $state('categories');
+
+// Timezone settings state
+let selectedTimezone = $state('Asia/Kolkata');
 
 // Add feed form state
 let newFeedUrl = $state('');
@@ -262,11 +269,19 @@ async function deleteFeed(feedId: number) {
 // Category Settings Functions
 function openCategorySettings() {
 	loadCategories();
+	activeTab = 'categories'; // Reset to categories tab
 	showCategorySettingsModal = true;
+	canCloseModal = false;
+	// Allow closing after a short delay to prevent accidental closes
+	setTimeout(() => {
+		canCloseModal = true;
+	}, 100);
 }
 
 function closeCategorySettings() {
-	showCategorySettingsModal = false;
+	if (canCloseModal) {
+		showCategorySettingsModal = false;
+	}
 }
 
 async function handleDndConsider(e: CustomEvent) {
@@ -343,14 +358,37 @@ async function toggleCategoryNtfy(category: Category) {
 	}
 }
 
+async function updateTimezone(timezone: string) {
+	const success = await settings.updateTimezone(timezone);
+	if (success) {
+		selectedTimezone = timezone;
+		toast.success('Timezone updated successfully');
+		// Trigger config changed to reload feeds with new timezone
+		onconfigchanged();
+	} else {
+		toast.error('Failed to update timezone');
+	}
+}
+
 
 function handleCategoryClick(category: string) {
 	onCategorySelect(category);
 }
 
 // Lifecycle
-onMount(() => {
+onMount(async () => {
 	loadFeedConfig();
+	await settings.load();
+	
+	// Subscribe to settings changes
+	const unsubscribe = settings.subscribe(s => {
+		selectedTimezone = s.timezone;
+	});
+	
+	// Cleanup subscription on unmount
+	return () => {
+		unsubscribe();
+	};
 });
 </script>
 
@@ -621,71 +659,117 @@ onMount(() => {
 {#if showCategorySettingsModal}
 	<div
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+		role="presentation"
 		onclick={(e) => {
-			if (e.target === e.currentTarget) closeCategorySettings();
+			if (e.target === e.currentTarget && canCloseModal) {
+				closeCategorySettings();
+			}
 		}}
 	>
 		<div class="w-full max-w-5xl rounded-lg bg-card p-6 shadow-lg">
-			<h3 class="mb-4 text-lg font-semibold">Manage Categories</h3>
+			<h3 class="mb-4 text-lg font-semibold">Settings</h3>
 
-			<div
-				class="mb-4 max-h-[60vh] overflow-y-auto"
-				use:dndzone={{ items: categoriesList }}
-				onconsider={handleDndConsider}
-				onfinalize={handleDndFinalize}
-			>
-				{#each categoriesList as category (category.id)}
-					{@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
-					<div class="mb-3 rounded-md bg-background p-3 border border-border">
-						<div class="flex items-center gap-4">
-							<GripVertical class="h-5 w-5 cursor-grab text-muted-foreground flex-shrink-0" />
-							<span class="font-medium flex-grow min-w-0 truncate">{category.name}</span>
+			<Tabs.Root bind:value={activeTab} class="w-full">
+				<Tabs.List class="grid w-full grid-cols-2">
+					<Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
+					<Tabs.Trigger value="timezone">Timezone Preference</Tabs.Trigger>
+				</Tabs.List>
 
-							<div class="flex items-center justify-between gap-2 w-[320px] flex-shrink-0">
-								<span class="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded truncate">
-									{topicName}
-								</span>
-								<Button
-									variant="ghost"
-									size="icon"
-									class="h-6 w-6"
-									onclick={() => copyToClipboard(topicName, 'Topic copied to clipboard')}
-								>
-									<Copy class="h-3 w-3" />
-								</Button>
+				<!-- Categories Tab -->
+				<Tabs.Content value="categories" class="mt-4 min-h-[400px]">
+					<div
+						class="mb-4 max-h-[60vh] overflow-y-auto"
+						use:dndzone={{ items: categoriesList }}
+						onconsider={handleDndConsider}
+						onfinalize={handleDndFinalize}
+					>
+						{#each categoriesList as category (category.id)}
+							{@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
+							<div class="mb-3 rounded-md bg-background p-3 border border-border">
+								<div class="flex items-center gap-4">
+									<GripVertical class="h-5 w-5 cursor-grab text-muted-foreground flex-shrink-0" />
+									<span class="font-medium flex-grow min-w-0 truncate">{category.name}</span>
+
+									<div class="flex items-center justify-between gap-2 w-[320px] flex-shrink-0">
+										<span class="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded truncate">
+											{topicName}
+										</span>
+										<Button
+											variant="ghost"
+											size="icon"
+											class="h-6 w-6"
+											onclick={() => copyToClipboard(topicName, 'Topic copied to clipboard')}
+										>
+											<Copy class="h-3 w-3" />
+										</Button>
+									</div>
+
+									<div class="flex items-center gap-2 w-[120px] flex-shrink-0">
+										<Bell class="h-4 w-4 text-muted-foreground" />
+										<Switch.Switch
+											checked={category.ntfy_enabled}
+											onCheckedChange={() => toggleCategoryNtfy(category)}
+										/>
+										<span class="text-xs text-muted-foreground w-6">{category.ntfy_enabled ? 'On' : 'Off'}</span>
+									</div>
+
+									<div class="flex items-center gap-2 w-[180px] flex-shrink-0 justify-end">
+										<Button
+											variant={category.is_default ? 'secondary' : 'ghost'}
+											size="sm"
+											class="text-xs"
+											onclick={() => setDefaultCategory(category.id)}
+										>
+											{category.is_default ? 'Default' : 'Set Default'}
+										</Button>
+										<Button
+											variant="ghost"
+											size="icon"
+											class="h-8 w-8 flex-shrink-0"
+											onclick={() => deleteCategory(category.id)}
+										>
+											<Trash2 class="h-4 w-4" />
+										</Button>
+									</div>
+								</div>
 							</div>
+						{/each}
+					</div>
+				</Tabs.Content>
 
-							<div class="flex items-center gap-2 w-[120px] flex-shrink-0">
-								<Bell class="h-4 w-4 text-muted-foreground" />
-								<Switch.Switch
-									checked={category.ntfy_enabled}
-									onCheckedChange={() => toggleCategoryNtfy(category)}
-								/>
-								<span class="text-xs text-muted-foreground w-6">{category.ntfy_enabled ? 'On' : 'Off'}</span>
-							</div>
+				<!-- Timezone Tab -->
+				<Tabs.Content value="timezone" class="mt-4 min-h-[400px]">
+					<div class="space-y-4 p-4">
+						<div>
+							<h4 class="text-sm font-medium mb-2">Select Your Timezone</h4>
+							<p class="text-sm text-muted-foreground mb-4">
+								Choose your preferred timezone for displaying article timestamps.
+							</p>
+						</div>
 
-							<div class="flex items-center gap-2 w-[180px] flex-shrink-0 justify-end">
-								<Button
-									variant={category.is_default ? 'secondary' : 'ghost'}
-									size="sm"
-									class="text-xs"
-									onclick={() => setDefaultCategory(category.id)}
-								>
-									{category.is_default ? 'Default' : 'Set Default'}
-								</Button>
-								<Button
-									variant="ghost"
-									size="icon"
-									class="h-8 w-8 flex-shrink-0"
-									onclick={() => deleteCategory(category.id)}
-								>
-									<Trash2 class="h-4 w-4" />
-								</Button>
-							</div>
+						<div class="space-y-2">
+							<label class="text-sm font-medium">Timezone</label>
+							<Select.Root type="single" bind:value={selectedTimezone}>
+								<Select.Trigger class="w-full">
+									{selectedTimezone === 'Asia/Kolkata' ? 'IST (Asia/Kolkata)' : 'UTC'}
+								</Select.Trigger>
+								<Select.Content>
+									<Select.Item value="Asia/Kolkata" onclick={() => updateTimezone('Asia/Kolkata')}>
+										IST (Asia/Kolkata)
+									</Select.Item>
+									<Select.Item value="UTC" onclick={() => updateTimezone('UTC')}>
+										UTC
+									</Select.Item>
+								</Select.Content>
+							</Select.Root>
+						</div>
+
+						<div class="rounded-md bg-muted p-3 text-sm text-muted-foreground">
+							<p><strong>Note:</strong> Changing the timezone will update how article timestamps are displayed throughout the application.</p>
 						</div>
 					</div>
-				{/each}
-			</div>
+				</Tabs.Content>
+			</Tabs.Root>
 
 			<div class="mt-6 flex justify-end">
 				<Button variant="outline" onclick={closeCategorySettings}>Close</Button>

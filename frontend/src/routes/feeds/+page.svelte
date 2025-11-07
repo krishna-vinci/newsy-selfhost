@@ -547,9 +547,11 @@ $effect(() => {
 								<Button
 									variant="outline"
 									size="icon-sm"
-									onclick={() => copyToClipboard(article.link, 'Link copied to clipboard!')}
+									href={article.link}
+									target="_blank"
+									rel="noopener noreferrer"
 								>
-									<Copy class="size-4" />
+									<ExternalLink class="size-4" />
 								</Button>
 							</div>
 						</div>
@@ -610,9 +612,11 @@ $effect(() => {
 							<Button
 								variant="ghost"
 								size="icon-sm"
-								onclick={() => copyToClipboard(article.link, 'Link copied to clipboard!')}
+								href={article.link}
+								target="_blank"
+								rel="noopener noreferrer"
 							>
-								<Copy class="size-4" />
+								<ExternalLink class="size-4" />
 							</Button>
 						</div>
 					</li>

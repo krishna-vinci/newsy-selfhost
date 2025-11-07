@@ -195,6 +195,12 @@ async def init_db():
          last_update TIMESTAMPTZ
     );
     """)
+    await conn.execute("""
+    CREATE TABLE IF NOT EXISTS user_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    """)
     
     # Add ntfy_enabled column if it doesn't exist (migration for existing databases)
     try:
@@ -204,6 +210,14 @@ async def init_db():
     except Exception:
         # Column already exists, ignore
         pass
+    
+    # Initialize default timezone setting if not exists
+    timezone_exists = await conn.fetchval("SELECT COUNT(*) FROM user_settings WHERE key = 'timezone'")
+    if timezone_exists == 0:
+        await conn.execute(
+            "INSERT INTO user_settings (key, value) VALUES ($1, $2)",
+            'timezone', 'Asia/Kolkata'
+        )
     
     # Check if feeds table is empty to perform initial population
     if await conn.fetchval("SELECT COUNT(*) FROM feeds") == 0:
@@ -603,7 +617,43 @@ async def get_total_articles_count(category: str = None, days: int = 2, starred_
         await conn.close()
 
 
-async def get_articles_for_category_db(category: str, days: int = 2, starred_only: bool = False, limit: int = None, offset: int = None):
+async def get_user_timezone():
+    """Get user's preferred timezone from settings."""
+    conn = await get_db_connection()
+    timezone_str = await conn.fetchval("SELECT value FROM user_settings WHERE key = 'timezone'")
+    await conn.close()
+    return pytz.timezone(timezone_str) if timezone_str else IST
+
+async def convert_article_timezone(article: dict, target_tz):
+    """Convert article's published datetime to target timezone and update published string."""
+    if article.get('published_datetime'):
+        try:
+            # Parse the datetime (should be in UTC from database)
+            pub_dt = datetime.fromisoformat(article['published_datetime'].replace('Z', '+00:00'))
+            
+            # Convert to target timezone
+            pub_dt_converted = pub_dt.astimezone(target_tz)
+            
+            # Update the published_datetime ISO string
+            article['published_datetime'] = pub_dt_converted.isoformat()
+            
+            # Update the human-readable published string
+            now = datetime.now(target_tz)
+            yesterday = now - timedelta(days=1)
+            tz_abbr = pub_dt_converted.strftime("%Z")
+            
+            if pub_dt_converted.date() == now.date():
+                article['published'] = pub_dt_converted.strftime("Today at %I:%M %p") + f" ({tz_abbr})"
+            elif pub_dt_converted.date() == yesterday.date():
+                article['published'] = pub_dt_converted.strftime("Yesterday at %I:%M %p") + f" ({tz_abbr})"
+            else:
+                article['published'] = pub_dt_converted.strftime("%b %d, %Y - %I:%M %p") + f" ({tz_abbr})"
+        except Exception as e:
+            logging.warning(f"Error converting timezone for article: {e}")
+    
+    return article
+
+async def get_articles_for_category_db(category: str, days: int = 2, starred_only: bool = False, limit: int = None, offset: int = None, target_tz=None):
      threshold = datetime.now(IST) - timedelta(days=days)
      conn = await get_db_connection()
      
@@ -639,7 +689,7 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
          pub_dt = row['published_datetime']
          pub_dt_str = pub_dt.isoformat() if pub_dt else None
          
-         articles.append({
+         article = {
              "title": row['title'],
              "link": row['link'],
              "description": row['description'],
@@ -650,12 +700,18 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
              "content": row['content'],
              "source": row['source'] or "Unknown",
              "starred": row['starred']
-         })
+         }
+         
+         # Convert timezone if target_tz is provided
+         if target_tz:
+             article = await convert_article_timezone(article, target_tz)
+         
+         articles.append(article)
      await conn.close()
      return articles
 
 
-async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, limit: int = 100, offset: int = 0, category: str = None):
+async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, limit: int = 100, offset: int = 0, category: str = None, target_tz=None):
     """Get articles across all categories with pagination"""
     threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
@@ -689,7 +745,7 @@ async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, 
             pub_dt = row['published_datetime']
             pub_dt_str = pub_dt.isoformat() if pub_dt else None
             
-            articles.append({
+            article = {
                 "title": row['title'],
                 "link": row['link'],
                 "description": row['description'],
@@ -700,7 +756,13 @@ async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, 
                 "content": row['content'],
                 "source": row['source'] or "Unknown",
                 "starred": row['starred']
-            })
+            }
+            
+            # Convert timezone if target_tz is provided
+            if target_tz:
+                article = await convert_article_timezone(article, target_tz)
+            
+            articles.append(article)
         
         return articles
     finally:
@@ -1040,6 +1102,9 @@ async def feeds(
     - If neither is provided, returns standard feed view grouped by category
     """
     
+    # Get user's timezone preference
+    user_tz = await get_user_timezone()
+    
     # Paginated mode - returns flat list with metadata
     if limit is not None:
         offset = offset or 0
@@ -1050,7 +1115,8 @@ async def feeds(
             starred_only=starred_only,
             limit=limit,
             offset=offset,
-            category=category
+            category=category,
+            target_tz=user_tz
         )
         
         # Apply search filter if provided
@@ -1118,7 +1184,7 @@ async def feeds(
             
         categories_list = []
         for cat in ordered_categories:
-            articles = await get_articles_for_category_db(cat, days=days, starred_only=starred_only)
+            articles = await get_articles_for_category_db(cat, days=days, starred_only=starred_only, target_tz=user_tz)
             if articles:
                 categories_list.append({"category": cat, "feed_items": articles})
                 
@@ -1294,6 +1360,35 @@ async def delete_feed(feed_id: int):
         return JSONResponse({"message": "Feed deleted successfully."})
     except Exception as e:
         logging.error(f"Error deleting feed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get all user settings."""
+    conn = await get_db_connection()
+    rows = await conn.fetch("SELECT key, value FROM user_settings")
+    settings = {row['key']: row['value'] for row in rows}
+    await conn.close()
+    return JSONResponse(content=settings)
+
+@app.put("/api/settings")
+async def update_settings(request: Request):
+    """Update user settings."""
+    try:
+        body = await request.json()
+        
+        conn = await get_db_connection()
+        
+        for key, value in body.items():
+            await conn.execute(
+                "INSERT INTO user_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2",
+                key, value
+            )
+        
+        await conn.close()
+        return JSONResponse({"message": "Settings updated successfully"})
+    except Exception as e:
+        logging.error(f"Error updating settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/categories")
