@@ -1,13 +1,14 @@
 <script lang="ts">
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
-import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink } from '@lucide/svelte';
+import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
 import Button from '$lib/components/ui/button/index.svelte';
 import Badge from '$lib/components/ui/badge/index.svelte';
 import Separator from '$lib/components/ui/separator/index.svelte';
 import Dialog from '$lib/components/ui/dialog/index.svelte';
 import Card from '$lib/components/ui/card/index.svelte';
+import Input from '$lib/components/ui/input/index.svelte';
 import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 import FeedSidebar from '$lib/components/FeedSidebar.svelte';
 
@@ -22,6 +23,7 @@ import FeedSidebar from '$lib/components/FeedSidebar.svelte';
 		published: string;
 		published_datetime: string;
 		source: string;
+		starred: boolean;
 	};
 	type Category = {
 		category: string;
@@ -36,15 +38,30 @@ let selectedArticle = $state<FeedItem | null>(null);
 let articleContent = $state<string>('');
 let isLoadingContent = $state(false);
 let selectedColumnIndex = $state<number>(0);
+let searchQuery = $state<string>('');
+let isSearching = $state(false);
+let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+let searchResults = $state<Category[]>([]);
+let isSearchMode = $state<boolean>(false);
+let isStarredViewActive = $state<boolean>(false);
+let isGeneratingReport = $state<boolean>(false);
 
 // Derived
 const categories = $derived(data.categories as Category[] || []);
 
+// Use search results if in search mode, otherwise use original categories
+const displayCategories = $derived(isSearchMode ? searchResults : categories);
+
 const filteredArticles = $derived(
 		selectedCategory === 'all'
-			? categories.flatMap(cat => cat.feed_items)
-			: categories.find(cat => cat.category === selectedCategory)?.feed_items || []
+			? displayCategories.flatMap(cat => cat.feed_items)
+			: displayCategories.find(cat => cat.category === selectedCategory)?.feed_items || []
 	);
+
+// Total search result count (only relevant when searching)
+const searchResultCount = $derived(
+	isSearchMode ? searchResults.flatMap(cat => cat.feed_items).length : 0
+);
 
 	// Functions
 	function copyToClipboard(url: string) {
@@ -97,10 +114,123 @@ const filteredArticles = $derived(
 
 function handleCategorySelect(category: string) {
 selectedCategory = category;
+// Re-fetch data with current filters (search, starred, etc.)
+if (searchQuery.trim() || isStarredViewActive) {
+	fetchFeedsData();
+}
 }
 
 async function handleConfigChanged() {
 await invalidateAll();
+}
+
+async function performSearch(query: string) {
+	if (!query.trim()) {
+		// Clear search - but keep starred view if active
+		isSearchMode = isStarredViewActive;
+		searchResults = [];
+		if (!isStarredViewActive) {
+			await invalidateAll();
+		} else {
+			await fetchFeedsData();
+		}
+		return;
+	}
+	
+	await fetchFeedsData();
+}
+
+function handleSearchInput(event: Event) {
+	const target = event.target as HTMLInputElement;
+	searchQuery = target.value;
+	
+	// Debounce search
+	if (searchTimeout) {
+		clearTimeout(searchTimeout);
+	}
+	
+	searchTimeout = setTimeout(() => {
+		performSearch(searchQuery);
+	}, 300);
+}
+
+async function clearSearch() {
+	searchQuery = '';
+	// Keep starred view active if it was on
+	if (isStarredViewActive) {
+		await fetchFeedsData();
+	} else {
+		isSearchMode = false;
+		searchResults = [];
+		await invalidateAll();
+	}
+}
+
+async function toggleStarredView() {
+	isStarredViewActive = !isStarredViewActive;
+	await fetchFeedsData();
+}
+
+async function fetchFeedsData() {
+	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
+	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
+	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	
+	try {
+		const response = await fetch(`/api/feeds?days=2${categoryParam}${searchParam}${starredParam}`);
+		if (!response.ok) throw new Error('Failed to fetch feeds');
+		
+		const results = await response.json();
+		
+		if (searchQuery.trim() || isStarredViewActive) {
+			isSearchMode = true;
+			searchResults = results;
+		} else {
+			isSearchMode = false;
+			await invalidateAll();
+		}
+	} catch (error) {
+		console.error('Error fetching feeds:', error);
+		toast.error('Failed to load feeds');
+	}
+}
+
+async function toggleArticleStar(article: FeedItem, event?: Event) {
+	if (event) {
+		event.stopPropagation();
+		event.preventDefault();
+	}
+	
+	// Optimistic update
+	const previousStarred = article.starred;
+	article.starred = !article.starred;
+	
+	try {
+		const response = await fetch('/api/article/star', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				link: article.link,
+				starred: article.starred
+			})
+		});
+		
+		if (!response.ok) {
+			throw new Error('Failed to update starred status');
+		}
+		
+		toast.success(article.starred ? 'Article starred!' : 'Article unstarred');
+		
+		// If in starred view and article was unstarred, refresh to remove it
+		if (isStarredViewActive && !article.starred) {
+			await fetchFeedsData();
+		}
+	} catch (error) {
+		// Revert on error
+		article.starred = previousStarred;
+		console.error('Error toggling star:', error);
+		toast.error('Failed to update starred status');
+	}
 }
 
 // Keyboard navigation for column view
@@ -118,6 +248,36 @@ function handleKeydown(event: KeyboardEvent) {
 		}
 	}
 
+// Generate starred report for current category
+async function generateStarredReport() {
+	if (selectedCategory === 'all') {
+		toast.error('Please select a specific category to generate a report');
+		return;
+	}
+	
+	isGeneratingReport = true;
+	
+	try {
+		const response = await fetch(`/api/reports/generate/starred/${encodeURIComponent(selectedCategory)}`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' }
+		});
+		
+		if (!response.ok) {
+			const error = await response.json();
+			throw new Error(error.detail || 'Failed to generate report');
+		}
+		
+		const result = await response.json();
+		toast.success(`Report generated successfully! ${result.article_count} articles included.`);
+	} catch (error) {
+		console.error('Error generating report:', error);
+		toast.error(error instanceof Error ? error.message : 'Failed to generate report');
+	} finally {
+		isGeneratingReport = false;
+	}
+}
+
 // Initialize column view
 $effect(() => {
 if (viewMode === 'column' && filteredArticles.length > 0) {
@@ -126,6 +286,12 @@ loadArticleContent(filteredArticles[0].link);
 }
 });
 </script>
+
+<style>
+    .prose :global(p) {
+        margin-bottom: 1em;
+    }
+</style>
 
 <svelte:window onkeydown={handleKeydown} />
 
@@ -136,57 +302,128 @@ loadArticleContent(filteredArticles[0].link);
 
 <!-- Main Content -->
 <Sidebar.Inset>
-<div class="container mx-auto max-w-7xl px-4 py-8">
+<div class="w-full px-8 py-8">
 <!-- Header -->
 <div class="mb-8 flex flex-col gap-4">
-<div class="flex items-center justify-between">
-<div class="flex items-center gap-2">
-<Sidebar.Trigger />
-<h1 class="text-2xl font-bold">
-{selectedCategory === 'all' ? 'All Feeds' : selectedCategory}
-</h1>
-</div>
+	<div class="flex items-center justify-between gap-4">
+		<div class="flex items-center gap-2 min-w-0">
+			<Sidebar.Trigger />
+			<h1 class="text-2xl font-bold truncate">
+				{selectedCategory === 'all' ? 'All Feeds' : selectedCategory}
+			</h1>
+			{#if isSearchMode && searchQuery}
+				<Badge variant="outline" class="text-xs shrink-0">
+					{searchResultCount} result{searchResultCount !== 1 ? 's' : ''}
+				</Badge>
+			{/if}
+		</div>
 
-<!-- View Mode Toggle -->
-<div class="flex gap-2">
-<Button
-variant={viewMode === 'card' ? 'default' : 'outline'}
-size="icon"
-onclick={() => viewMode = 'card'}
-aria-label="Card view"
->
-<LayoutGrid class="size-4" />
-</Button>
-<Button
-variant={viewMode === 'headline' ? 'default' : 'outline'}
-size="icon"
-onclick={() => viewMode = 'headline'}
-aria-label="Headline view"
->
-<List class="size-4" />
-</Button>
-<Button
-variant={viewMode === 'column' ? 'default' : 'outline'}
-size="icon"
-onclick={() => viewMode = 'column'}
-aria-label="Column view"
->
-<Columns2 class="size-4" />
-</Button>
-</div>
-</div>
-<Separator />
+		<div class="flex items-center gap-3 shrink-0">
+			<!-- Search Input -->
+			<div class="relative w-64">
+				<Search class="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+				<Input
+					type="text"
+					placeholder="Search articles..."
+					value={searchQuery}
+					oninput={handleSearchInput}
+					class="pl-9 pr-9"
+					disabled={isSearching}
+				/>
+				{#if searchQuery}
+					<button
+						onclick={clearSearch}
+						class="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+						aria-label="Clear search"
+					>
+						<X class="size-4" />
+					</button>
+				{/if}
+			</div>
+
+			<!-- Generate Report Button (only show for specific category) -->
+			{#if selectedCategory !== 'all'}
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={generateStarredReport}
+					disabled={isGeneratingReport}
+					aria-label="Generate starred report"
+				>
+					<FileText class="size-4 mr-2" />
+					{isGeneratingReport ? 'Generating...' : 'Generate Report'}
+				</Button>
+			{/if}
+
+			<!-- Starred View Toggle -->
+			<Button
+				variant={isStarredViewActive ? 'default' : 'outline'}
+				size="icon"
+				onclick={toggleStarredView}
+				aria-label="Starred articles"
+				class={isStarredViewActive ? 'bg-yellow-500 hover:bg-yellow-600' : ''}
+			>
+				<Star class="size-4" fill={isStarredViewActive ? 'currentColor' : 'none'} />
+			</Button>
+
+			<!-- View Mode Toggle -->
+			<div class="flex gap-2">
+				<Button
+					variant={viewMode === 'card' ? 'default' : 'outline'}
+					size="icon"
+					onclick={() => viewMode = 'card'}
+					aria-label="Card view"
+				>
+					<LayoutGrid class="size-4" />
+				</Button>
+				<Button
+					variant={viewMode === 'headline' ? 'default' : 'outline'}
+					size="icon"
+					onclick={() => viewMode = 'headline'}
+					aria-label="Headline view"
+				>
+					<List class="size-4" />
+				</Button>
+				<Button
+					variant={viewMode === 'column' ? 'default' : 'outline'}
+					size="icon"
+					onclick={() => viewMode = 'column'}
+					aria-label="Column view"
+				>
+					<Columns2 class="size-4" />
+				</Button>
+			</div>
+		</div>
+	</div>
+	<Separator />
 </div>
 
 <!-- Content -->
 {#if filteredArticles.length === 0}
 		<div class="flex flex-col items-center justify-center py-16 text-center">
-			<p class="text-lg text-muted-foreground">No articles found</p>
-			<p class="text-sm text-muted-foreground">Try selecting a different category</p>
+			{#if isStarredViewActive}
+				<Star class="size-16 mb-4 text-muted-foreground" />
+				<p class="text-lg text-muted-foreground">No starred articles</p>
+				<p class="text-sm text-muted-foreground">
+					{selectedCategory === 'all' ? 'Star some articles to see them here' : `No starred articles in ${selectedCategory}`}
+				</p>
+				<Button variant="outline" class="mt-4" onclick={toggleStarredView}>
+					Show All Articles
+				</Button>
+			{:else if isSearchMode}
+				<p class="text-lg text-muted-foreground">No results found for "{searchQuery}"</p>
+				<p class="text-sm text-muted-foreground">Try a different search term or clear the search</p>
+				<Button variant="outline" class="mt-4" onclick={clearSearch}>
+					Clear Search
+				</Button>
+			{:else}
+				<p class="text-lg text-muted-foreground">No articles found</p>
+				<p class="text-sm text-muted-foreground">Try selecting a different category</p>
+			{/if}
 		</div>
 	{:else if viewMode === 'card'}
 		<!-- Card View -->
-		<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+		<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
 			{#each filteredArticles as article}
 				<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg">
 					<div class="flex flex-grow flex-col gap-4">
@@ -217,6 +454,14 @@ aria-label="Column view"
 								<Button
 									variant="outline"
 									size="icon-sm"
+									onclick={(e) => toggleArticleStar(article, e)}
+									class={article.starred ? 'text-yellow-500 hover:text-yellow-600' : ''}
+								>
+									<Star class="size-4" fill={article.starred ? 'currentColor' : 'none'} />
+								</Button>
+								<Button
+									variant="outline"
+									size="icon-sm"
 									onclick={() => openArticleModal(article)}
 								>
 									<Eye class="size-4" />
@@ -236,28 +481,27 @@ aria-label="Column view"
 		</div>
 	{:else if viewMode === 'headline'}
 		<!-- Headline View -->
-		<div class="flex flex-col gap-2">
-			{#each filteredArticles as article}
-				<Card class="group transition-all hover:shadow-md">
-					<div class="flex items-start gap-4 px-6 py-4">
-						{#if article.thumbnail}
-							<img
-								src={article.thumbnail}
-								alt={article.title}
-								class="h-16 w-24 shrink-0 rounded-md object-cover"
-								onerror={(e) => {
-									(e.currentTarget as HTMLImageElement).src = '/default-thumbnail.jpg';
-								}}
-							/>
-						{/if}
-						<div class="flex min-w-0 flex-1 flex-col gap-2">
-							<div class="flex items-center gap-2">
-								<Badge variant="secondary">{article.source}</Badge>
-								<span class="text-xs text-muted-foreground">{article.published}</span>
+		<div class="mx-auto">
+			<ul class="grid grid-cols-1 gap-4 md:grid-cols-2">
+				{#each filteredArticles as article}
+					<li class="group flex items-center gap-4 rounded-lg border p-4 transition-all hover:bg-muted">
+						<div class="flex min-w-0 flex-1 flex-col gap-1">
+							<h3 class="font-semibold leading-snug">{article.title}</h3>
+							<div class="flex items-center gap-2 text-xs text-muted-foreground">
+								<span>{article.source}</span>
+								<span>&bull;</span>
+								<span>{article.published}</span>
 							</div>
-							<h3 class="line-clamp-2 text-base font-semibold leading-snug">{article.title}</h3>
 						</div>
 						<div class="flex shrink-0 gap-2">
+							<Button
+								variant="ghost"
+								size="icon-sm"
+								onclick={(e) => toggleArticleStar(article, e)}
+								class={article.starred ? 'text-yellow-500 hover:text-yellow-600' : ''}
+							>
+								<Star class="size-4" fill={article.starred ? 'currentColor' : 'none'} />
+							</Button>
 							<Button
 								variant="ghost"
 								size="icon-sm"
@@ -273,9 +517,9 @@ aria-label="Column view"
 								<Copy class="size-4" />
 							</Button>
 						</div>
-					</div>
-				</Card>
-			{/each}
+					</li>
+				{/each}
+			</ul>
 		</div>
 	{:else if viewMode === 'column'}
 		<!-- Column View -->
@@ -308,6 +552,14 @@ aria-label="Column view"
 								</div>
 								<h3 class="line-clamp-2 text-base font-semibold leading-snug">{article.title}</h3>
 							</div>
+							<Button
+								variant="ghost"
+								size="icon-sm"
+								onclick={(e) => toggleArticleStar(article, e)}
+								class={article.starred ? 'text-yellow-500 hover:text-yellow-600' : ''}
+							>
+								<Star class="size-4" fill={article.starred ? 'currentColor' : 'none'} />
+							</Button>
 						</div>
 					</Card>
 				{/each}
@@ -331,6 +583,14 @@ aria-label="Column view"
 									</div>
 								</div>
 								<div class="flex shrink-0 gap-2">
+									<Button
+										variant="outline"
+										size="icon-sm"
+										onclick={(e) => toggleArticleStar(filteredArticles[selectedColumnIndex], e)}
+										class={filteredArticles[selectedColumnIndex].starred ? 'text-yellow-500 hover:text-yellow-600' : ''}
+									>
+										<Star class="size-4" fill={filteredArticles[selectedColumnIndex].starred ? 'currentColor' : 'none'} />
+									</Button>
 									<Button
 										variant="outline"
 										size="icon-sm"

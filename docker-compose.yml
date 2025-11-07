@@ -11,6 +11,8 @@ services:
       - NITTER_URL=https://nitter.space
       - PROJECTS_ROOT=/app/data/youtube-videos
       - DAILY_REPORT_DIR=/app/data/daily_report
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     volumes:
       - /mnt/youtube-cm/youtube-data:/app/data
       - .:/app
@@ -19,6 +21,7 @@ services:
       - db-net
     depends_on:
       - rss_newsapp_db
+      - redis
 
   rss_newsapp_db:
     image: postgres:alpine
@@ -32,8 +35,18 @@ services:
       - db-net
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - db-net
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  redis_data:
 
 networks:
   db-net:
