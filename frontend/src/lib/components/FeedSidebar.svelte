@@ -6,7 +6,7 @@ import Button from '$lib/components/ui/button/index.svelte';
 import Input from '$lib/components/ui/input/index.svelte';
 import Checkbox from '$lib/components/ui/checkbox/index.svelte';
 import * as Select from '$lib/components/ui/select/index.js';
-import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical } from '@lucide/svelte';
+import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText } from '@lucide/svelte';
 import { dndzone } from 'svelte-dnd-action';
 
 
@@ -340,6 +340,14 @@ onMount(() => {
 						class={selectedCategory === 'all' ? 'bg-accent' : ''}
 					>
 						<span class="font-semibold">All Categories</span>
+					</Sidebar.MenuButton>
+				</Sidebar.MenuItem>
+				<Sidebar.MenuItem>
+					<Sidebar.MenuButton
+						href="/reports"
+					>
+						<FileText class="mr-2 h-4 w-4" />
+						<span>Reports</span>
 					</Sidebar.MenuButton>
 				</Sidebar.MenuItem>
 			</Sidebar.Menu>

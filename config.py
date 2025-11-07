@@ -15,12 +15,20 @@ class Config:
     # FastAPI Settings
     FASTAPI_HOST_PORT = os.getenv("FASTAPI_HOST_PORT", "8666")
     
+    # Redis Settings
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+    
     # Other Services / API Keys
     RSSBRIDGE_HOST = os.getenv("RSSBRIDGE_HOST", "http://91/99.19.202:3333")
     NITTER_URL = os.getenv("NITTER_URL", "https://nitter.space")
 
     # Data Retention Policy
     DEFAULT_ARTICLE_RETENTION_DAYS = int(os.getenv("DEFAULT_ARTICLE_RETENTION_DAYS", 30))
+    
+    # Search Settings
+    SEARCH_SCORE_THRESHOLD = float(os.getenv("SEARCH_SCORE_THRESHOLD", "60.0"))
 
      # New variables for the Telegram bot and AI
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
