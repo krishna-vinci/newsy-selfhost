@@ -10,7 +10,7 @@ import Checkbox from '$lib/components/ui/checkbox/index.svelte';
 import * as Select from '$lib/components/ui/select/index.js';
 import * as Switch from '$lib/components/ui/switch/index.ts';
 import * as Tabs from '$lib/components/ui/tabs/index.js';
-import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy } from '@lucide/svelte';
+import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash } from '@lucide/svelte';
 import { dndzone } from 'svelte-dnd-action';
 import { settings } from '$lib/stores/settings';
 
@@ -65,6 +65,12 @@ let activeTab = $state('categories');
 
 // Timezone settings state
 let selectedTimezone = $state('Asia/Kolkata');
+
+// Backup & Export state
+let backups = $state<any[]>([]);
+let isLoadingBackups = $state(false);
+let isCreatingBackup = $state(false);
+let isRestoringBackup = $state(false);
 
 // Add feed form state
 let newFeedUrl = $state('');
@@ -269,6 +275,7 @@ async function deleteFeed(feedId: number) {
 // Category Settings Functions
 function openCategorySettings() {
 	loadCategories();
+	loadBackups(); // Load backups when opening settings
 	activeTab = 'categories'; // Reset to categories tab
 	showCategorySettingsModal = true;
 	canCloseModal = false;
@@ -370,6 +377,135 @@ async function updateTimezone(timezone: string) {
 	}
 }
 
+// Backup & Export Functions
+async function loadBackups() {
+	isLoadingBackups = true;
+	try {
+		const response = await fetch('/api/backups');
+		if (response.ok) {
+			backups = await response.json();
+		}
+	} catch (error) {
+		toast.error('Failed to load backups');
+		console.error(error);
+	} finally {
+		isLoadingBackups = false;
+	}
+}
+
+async function createBackup() {
+	isCreatingBackup = true;
+	try {
+		const response = await fetch('/api/backups', { method: 'POST' });
+		if (response.ok) {
+			toast.success('Backup created successfully');
+			await loadBackups();
+		} else {
+			toast.error('Failed to create backup');
+		}
+	} catch (error) {
+		toast.error('Failed to create backup');
+		console.error(error);
+	} finally {
+		isCreatingBackup = false;
+	}
+}
+
+async function downloadBackup(filename: string) {
+	try {
+		window.open(`/api/backups/download/${filename}`, '_blank');
+	} catch (error) {
+		toast.error('Failed to download backup');
+	}
+}
+
+async function deleteBackup(filename: string) {
+	if (!confirm(`Are you sure you want to delete ${filename}?`)) return;
+	
+	try {
+		const response = await fetch(`/api/backups/${filename}`, { method: 'DELETE' });
+		if (response.ok) {
+			toast.success('Backup deleted');
+			await loadBackups();
+		} else {
+			toast.error('Failed to delete backup');
+		}
+	} catch (error) {
+		toast.error('Failed to delete backup');
+	}
+}
+
+async function restoreBackup(filename: string) {
+	if (!confirm(`WARNING: This will replace your current database with this backup. Are you sure?`)) return;
+	
+	isRestoringBackup = true;
+	try {
+		const response = await fetch('/api/backups/restore', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ filename })
+		});
+		if (response.ok) {
+			toast.success('Database restored successfully. Reloading...');
+			setTimeout(() => window.location.reload(), 2000);
+		} else {
+			toast.error('Failed to restore backup');
+		}
+	} catch (error) {
+		toast.error('Failed to restore backup');
+	} finally {
+		isRestoringBackup = false;
+	}
+}
+
+async function exportArticles(format: 'csv' | 'json') {
+	try {
+		window.open(`/api/export/articles?format=${format}`, '_blank');
+		toast.success(`Exporting articles as ${format.toUpperCase()}...`);
+	} catch (error) {
+		toast.error('Failed to export articles');
+	}
+}
+
+async function exportOPML() {
+	try {
+		window.open('/api/opml/export', '_blank');
+		toast.success('Exporting feeds as OPML...');
+	} catch (error) {
+		toast.error('Failed to export OPML');
+	}
+}
+
+async function importOPML(event: Event) {
+	const input = event.target as HTMLInputElement;
+	const file = input.files?.[0];
+	if (!file) return;
+	
+	const formData = new FormData();
+	formData.append('file', file);
+	
+	try {
+		const response = await fetch('/api/opml/import', {
+			method: 'POST',
+			body: formData
+		});
+		
+		if (response.ok) {
+			const result = await response.json();
+			toast.success(`Imported ${result.imported} feeds (${result.skipped} skipped)`);
+			await loadFeedConfig();
+			onconfigchanged();
+		} else {
+			toast.error('Failed to import OPML');
+		}
+	} catch (error) {
+		toast.error('Failed to import OPML');
+		console.error(error);
+	}
+	
+	// Reset input
+	input.value = '';
+}
 
 function handleCategoryClick(category: string) {
 	onCategorySelect(category);
@@ -670,9 +806,10 @@ onMount(async () => {
 			<h3 class="mb-4 text-lg font-semibold">Settings</h3>
 
 			<Tabs.Root bind:value={activeTab} class="w-full">
-				<Tabs.List class="grid w-full grid-cols-2">
+				<Tabs.List class="grid w-full grid-cols-3">
 					<Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
-					<Tabs.Trigger value="timezone">Timezone Preference</Tabs.Trigger>
+					<Tabs.Trigger value="timezone">Timezone</Tabs.Trigger>
+					<Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
 				</Tabs.List>
 
 				<!-- Categories Tab -->
@@ -766,6 +903,170 @@ onMount(async () => {
 
 						<div class="rounded-md bg-muted p-3 text-sm text-muted-foreground">
 							<p><strong>Note:</strong> Changing the timezone will update how article timestamps are displayed throughout the application.</p>
+						</div>
+					</div>
+				</Tabs.Content>
+
+				<!-- Backup & Export Tab -->
+				<Tabs.Content value="backup" class="mt-4 min-h-[400px]">
+					<div class="space-y-6 p-4">
+						<!-- Database Backups Section -->
+						<div class="space-y-4">
+							<div class="flex items-center justify-between">
+								<div>
+									<h4 class="text-sm font-semibold flex items-center gap-2">
+										<Database class="h-4 w-4" />
+										Database Backups
+									</h4>
+									<p class="text-xs text-muted-foreground mt-1">
+										Create and manage full database backups for disaster recovery
+									</p>
+								</div>
+								<Button
+									onclick={createBackup}
+									disabled={isCreatingBackup}
+									size="sm"
+									class="gap-2"
+								>
+									{#if isCreatingBackup}
+										<Loader2 class="h-4 w-4 animate-spin" />
+										Creating...
+									{:else}
+										<Plus class="h-4 w-4" />
+										Create Backup
+									{/if}
+								</Button>
+							</div>
+
+							{#if activeTab === 'backup'}
+								{#if !backups.length && !isLoadingBackups}
+									<div class="rounded-md border border-dashed p-8 text-center">
+										<Database class="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+										<p class="text-sm text-muted-foreground">No backups available</p>
+										<p class="text-xs text-muted-foreground mt-1">Create your first backup to get started</p>
+									</div>
+								{:else}
+									<div class="space-y-2 max-h-[200px] overflow-y-auto">
+										{#each backups as backup}
+											<div class="flex items-center justify-between rounded-md border p-3 bg-background">
+												<div class="flex-1 min-w-0">
+													<p class="text-sm font-medium truncate">{backup.filename}</p>
+													<p class="text-xs text-muted-foreground">
+														{new Date(backup.created_at).toLocaleString()} • {backup.size_mb} MB
+													</p>
+												</div>
+												<div class="flex items-center gap-1 ml-2">
+													<Button
+														variant="ghost"
+														size="icon"
+														class="h-8 w-8"
+														onclick={() => downloadBackup(backup.filename)}
+													>
+														<Download class="h-4 w-4" />
+													</Button>
+													<Button
+														variant="ghost"
+														size="icon"
+														class="h-8 w-8"
+														onclick={() => restoreBackup(backup.filename)}
+														disabled={isRestoringBackup}
+													>
+														<Upload class="h-4 w-4" />
+													</Button>
+													<Button
+														variant="ghost"
+														size="icon"
+														class="h-8 w-8 text-destructive"
+														onclick={() => deleteBackup(backup.filename)}
+													>
+														<Trash class="h-4 w-4" />
+													</Button>
+												</div>
+											</div>
+										{/each}
+									</div>
+								{/if}
+							{/if}
+						</div>
+
+						<!-- Data Export Section -->
+						<div class="space-y-4 pt-4 border-t">
+							<div>
+								<h4 class="text-sm font-semibold flex items-center gap-2">
+									<FileDown class="h-4 w-4" />
+									Export Articles
+								</h4>
+								<p class="text-xs text-muted-foreground mt-1">
+									Download your articles in portable formats
+								</p>
+							</div>
+							<div class="flex gap-2">
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => exportArticles('csv')}
+									class="gap-2"
+								>
+									<FileDown class="h-4 w-4" />
+									Export as CSV
+								</Button>
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => exportArticles('json')}
+									class="gap-2"
+								>
+									<FileDown class="h-4 w-4" />
+									Export as JSON
+								</Button>
+							</div>
+						</div>
+
+						<!-- OPML Import/Export Section -->
+						<div class="space-y-4 pt-4 border-t">
+							<div>
+								<h4 class="text-sm font-semibold flex items-center gap-2">
+									<FileText class="h-4 w-4" />
+									OPML Feed Migration
+								</h4>
+								<p class="text-xs text-muted-foreground mt-1">
+									Import or export your feed subscriptions
+								</p>
+							</div>
+							<div class="flex gap-2">
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={exportOPML}
+									class="gap-2"
+								>
+									<FileDown class="h-4 w-4" />
+									Export OPML
+								</Button>
+								<label class="cursor-pointer">
+									<input
+										type="file"
+										accept=".opml,.xml"
+										onchange={importOPML}
+										class="hidden"
+									/>
+									<Button
+										variant="outline"
+										size="sm"
+										class="gap-2"
+										onclick={(e) => {
+											e.preventDefault();
+											(e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement)?.click();
+										}}
+									>
+										<FileUp class="h-4 w-4" />
+										Import OPML
+									</Button>
+								</label>
+							</div>
+							<div class="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+								<p><strong>Note:</strong> Categorized feeds will be imported into matching categories. Uncategorized feeds will be placed in a "Feeds" category. Duplicate feeds will be skipped.</p>
+							</div>
 						</div>
 					</div>
 				</Tabs.Content>

@@ -18,7 +18,7 @@ from markdown_it import MarkdownIt
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, Request, Form, HTTPException, File, UploadFile, Query
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,9 +46,16 @@ import asyncio
 from fastapi import FastAPI
 import time
 import unicodedata
+import csv
+import io
+import subprocess
+import xml.etree.ElementTree as ET
+from typing import List
+from pydantic import BaseModel
 
 from config import Config  # Import our centralized config
 import reports  # Import reports module
+import backup_restore  # Import backup/restore/export module
 
 load_dotenv()  # Load environment variables
 
@@ -127,6 +134,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Include reports router
 app.include_router(reports.router)
+
+# Include backup/restore/export router
+app.include_router(backup_restore.router)
 
 
 def truncate_words(text, max_words=100):
@@ -213,6 +223,19 @@ async def init_db():
     try:
         await conn.execute("""
         ALTER TABLE categories ADD COLUMN ntfy_enabled BOOLEAN DEFAULT true;
+        """)
+    except Exception:
+        # Column already exists, ignore
+        pass
+    
+    # Add display_order column to feeds if it doesn't exist (migration for feed reordering)
+    try:
+        await conn.execute("""
+        ALTER TABLE feeds ADD COLUMN display_order INTEGER DEFAULT 0;
+        """)
+        # Initialize display_order for existing feeds based on priority
+        await conn.execute("""
+        UPDATE feeds SET display_order = priority WHERE display_order = 0;
         """)
     except Exception:
         # Column already exists, ignore

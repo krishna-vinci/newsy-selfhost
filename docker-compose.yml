@@ -5,6 +5,9 @@ services:
       - "8321:8321"
     env_file:
       - .env
+    volumes:
+      - backup_data:/app/data/backups
+      - reports_data:/app/reports
     # --- Development with Hot-Reload ---
     # Uncomment the 'command' and 'develop' sections below to enable hot-reloading, disable both for production.
     # When enabled, changes to your local files will be synced to the container,
@@ -50,6 +53,8 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  backup_data:
+  reports_data:
 
 networks:
   db-net:
