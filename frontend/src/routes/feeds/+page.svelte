@@ -1,7 +1,7 @@
 <script lang="ts">
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
-import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText } from '@lucide/svelte';
+import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
 import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import Button from '$lib/components/ui/button/index.svelte';
@@ -26,6 +26,7 @@ import FeedSidebar from '$lib/components/FeedSidebar.svelte';
 		source: string;
 		starred: boolean;
 		category: string;
+		is_read?: boolean;
 	};
 	type Category = {
 		category: string;
@@ -47,6 +48,8 @@ let searchResults = $state<Category[]>([]);
 let isSearchMode = $state<boolean>(false);
 let isStarredViewActive = $state<boolean>(false);
 let isGeneratingReport = $state<boolean>(false);
+let hideReadArticles = $state<boolean>(false);
+let readStatuses = $state<Record<string, boolean>>({});
 
 // Pagination state
 let allArticles = $state<FeedItem[]>([]);
@@ -57,6 +60,14 @@ let totalArticles = $state<number>(0);
 const INITIAL_LOAD = 100;
 const LOAD_MORE_SIZE = 50;
 
+// Helper function to merge articles with read statuses
+function mergeWithReadStatus(articles: FeedItem[]): FeedItem[] {
+	return articles.map(article => ({
+		...article,
+		is_read: readStatuses[article.link] || false
+	}));
+}
+
 // Derived
 const categories = $derived(data.categories as Category[] || []);
 
@@ -64,14 +75,23 @@ const categories = $derived(data.categories as Category[] || []);
 const displayCategories = $derived(isSearchMode ? searchResults : categories);
 
 // Use paginated articles if available, otherwise fall back to category-grouped data
-const filteredArticles = $derived(
-	allArticles.length > 0 
+const baseFilteredArticles = $derived.by(() => {
+	const articles = allArticles.length > 0 
 		? (selectedCategory === 'all' 
 			? allArticles 
 			: allArticles.filter(article => article.category === selectedCategory))
 		: (selectedCategory === 'all'
 			? displayCategories.flatMap(cat => cat.feed_items)
-			: displayCategories.find(cat => cat.category === selectedCategory)?.feed_items || [])
+			: displayCategories.find(cat => cat.category === selectedCategory)?.feed_items || []);
+	
+	return mergeWithReadStatus(articles);
+});
+
+// Filter out read articles if hideReadArticles is enabled
+const filteredArticles = $derived(
+	hideReadArticles 
+		? baseFilteredArticles.filter(article => !article.is_read)
+		: baseFilteredArticles
 );
 
 // Total search result count (only relevant when searching)
@@ -102,6 +122,8 @@ const searchResultCount = $derived(
 		selectedArticle = article;
 		modalOpen = true;
 		loadArticleContent(article.link);
+		// Mark as read when viewing
+		markAsRead([article.link]);
 	}
 
 function handleCategorySelect(category: string) {
@@ -153,6 +175,10 @@ async function toggleStarredView() {
 	await loadInitialArticles();
 }
 
+function toggleHideReadArticles() {
+	hideReadArticles = !hideReadArticles;
+}
+
 async function loadInitialArticles() {
 	// Reset pagination state
 	currentOffset = 0;
@@ -175,6 +201,8 @@ async function loadInitialArticles() {
 			totalArticles = data.total;
 			hasMore = data.has_more;
 			currentOffset = INITIAL_LOAD;
+			// Fetch read statuses for loaded articles
+			await fetchReadStatuses(data.articles);
 		} else {
 			// Fallback to old format (shouldn't happen with limit param)
 			console.warn('Unexpected response format');
@@ -201,6 +229,8 @@ async function loadMoreArticles() {
 		const data = await response.json();
 		
 		if (data.articles && Array.isArray(data.articles)) {
+			// Fetch read statuses for new articles
+			await fetchReadStatuses(data.articles);
 			allArticles = [...allArticles, ...data.articles];
 			hasMore = data.has_more;
 			currentOffset += data.articles.length;
@@ -263,6 +293,9 @@ async function toggleArticleStar(article: FeedItem, event?: Event) {
 		
 		toast.success(article.starred ? 'Article starred!' : 'Article unstarred');
 		
+		// Mark as read when starring
+		await markAsRead([article.link]);
+		
 		// If in starred view and article was unstarred, refresh to remove it
 		if (isStarredViewActive && !article.starred) {
 			await fetchFeedsData();
@@ -275,16 +308,75 @@ async function toggleArticleStar(article: FeedItem, event?: Event) {
 	}
 }
 
+async function fetchReadStatuses(articles: FeedItem[]) {
+	if (articles.length === 0) return;
+	
+	const links = articles.map(a => a.link);
+	
+	try {
+		const response = await fetch('/api/articles/statuses', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ links })
+		});
+		
+		if (!response.ok) {
+			throw new Error('Failed to fetch read statuses');
+		}
+		
+		const statuses = await response.json();
+		
+		// Update readStatuses state for reactivity
+		readStatuses = { ...readStatuses, ...statuses };
+	} catch (error) {
+		console.error('Error fetching read statuses:', error);
+	}
+}
+
+async function markAsRead(links: string[]) {
+	if (links.length === 0) return;
+	
+	try {
+		// Optimistically update readStatuses state
+		const newStatuses = { ...readStatuses };
+		links.forEach(link => {
+			newStatuses[link] = true;
+		});
+		readStatuses = newStatuses;
+		
+		const response = await fetch('/api/articles/mark-as-read', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ links })
+		});
+		
+		if (!response.ok) {
+			throw new Error('Failed to mark articles as read');
+		}
+	} catch (error) {
+		console.error('Error marking articles as read:', error);
+		// Could revert optimistic update here if needed
+	}
+}
+
 // Keyboard navigation for column view
 function handleKeydown(event: KeyboardEvent) {
 		if (viewMode !== 'column' || filteredArticles.length === 0) return;
 		
 		if (event.key === 'ArrowDown') {
 			event.preventDefault();
+			// Mark previous article as read
+			if (filteredArticles[selectedColumnIndex]) {
+				markAsRead([filteredArticles[selectedColumnIndex].link]);
+			}
 			selectedColumnIndex = Math.min(selectedColumnIndex + 1, filteredArticles.length - 1);
 			loadArticleContent(filteredArticles[selectedColumnIndex].link);
 		} else if (event.key === 'ArrowUp') {
 			event.preventDefault();
+			// Mark previous article as read
+			if (filteredArticles[selectedColumnIndex]) {
+				markAsRead([filteredArticles[selectedColumnIndex].link]);
+			}
 			selectedColumnIndex = Math.max(selectedColumnIndex - 1, 0);
 			loadArticleContent(filteredArticles[selectedColumnIndex].link);
 		}
@@ -325,6 +417,18 @@ $effect(() => {
 	if (viewMode === 'column' && filteredArticles.length > 0) {
 		selectedColumnIndex = 0;
 		loadArticleContent(filteredArticles[0].link);
+	}
+});
+
+// Fetch read statuses for initial server-loaded categories data
+let hasLoadedInitialStatuses = false;
+$effect(() => {
+	if (!hasLoadedInitialStatuses && categories.length > 0) {
+		hasLoadedInitialStatuses = true;
+		const allCategoryArticles = categories.flatMap(cat => cat.feed_items);
+		if (allCategoryArticles.length > 0) {
+			fetchReadStatuses(allCategoryArticles);
+		}
 	}
 });
 
@@ -444,6 +548,21 @@ $effect(() => {
 				<Star class="size-4" fill={isStarredViewActive ? 'currentColor' : 'none'} />
 			</Button>
 
+			<!-- Hide/Show Read Toggle -->
+			<Button
+				variant={hideReadArticles ? 'default' : 'outline'}
+				size="icon"
+				onclick={toggleHideReadArticles}
+				aria-label={hideReadArticles ? 'Show read articles' : 'Hide read articles'}
+				title={hideReadArticles ? 'Showing unread only' : 'Show all articles'}
+			>
+				{#if hideReadArticles}
+					<CheckCircle class="size-4" />
+				{:else}
+					<Circle class="size-4" />
+				{/if}
+			</Button>
+
 			<!-- View Mode Toggle -->
 			<div class="flex gap-2">
 				<Button
@@ -503,7 +622,7 @@ $effect(() => {
 		<!-- Card View -->
 		<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
 			{#each filteredArticles as article}
-				<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg">
+				<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg {article.is_read ? 'opacity-60' : ''}">
 					<div class="flex flex-grow flex-col gap-4">
 						{#if article.thumbnail}
 							<div class="relative -mt-6 -mx-6 overflow-hidden rounded-t-xl">
@@ -523,7 +642,7 @@ $effect(() => {
 									<Badge variant="secondary">{article.source}</Badge>
 									<span class="text-xs text-muted-foreground">{article.published}</span>
 								</div>
-								<h3 class="mt-2 line-clamp-2 text-lg font-semibold leading-tight">{article.title}</h3>
+								<h3 class="mt-2 line-clamp-2 text-lg leading-tight">{article.title}</h3>
 								{#if article.description}
 									<p class="mt-1 line-clamp-3 text-sm text-muted-foreground">{article.description}</p>
 								{/if}
@@ -584,9 +703,9 @@ $effect(() => {
 		<div class="mx-auto">
 			<ul class="grid grid-cols-1 gap-4 md:grid-cols-2">
 				{#each filteredArticles as article}
-					<li class="group flex items-center gap-4 rounded-lg border p-4 transition-all hover:bg-muted">
+					<li class="group flex items-center gap-4 rounded-lg border p-4 transition-all hover:bg-muted {article.is_read ? 'opacity-60' : ''}">
 						<div class="flex min-w-0 flex-1 flex-col gap-1">
-							<h3 class="font-semibold leading-snug">{article.title}</h3>
+							<h3 class="leading-snug">{article.title}</h3>
 							<div class="flex items-center gap-2 text-xs text-muted-foreground">
 								<span>{article.source}</span>
 								<span>&bull;</span>
@@ -650,8 +769,12 @@ $effect(() => {
 			<div class="flex flex-col gap-2">
 				{#each filteredArticles as article, index}
 					<Card
-						class="group cursor-pointer transition-all {selectedColumnIndex === index ? 'ring-2 ring-primary' : 'hover:shadow-md'}"
+						class="group cursor-pointer transition-all {selectedColumnIndex === index ? 'ring-2 ring-primary' : 'hover:shadow-md'} {article.is_read ? 'opacity-60' : ''}"
 						onclick={() => {
+							// Mark previous article as read when switching
+							if (selectedColumnIndex !== index && filteredArticles[selectedColumnIndex]) {
+								markAsRead([filteredArticles[selectedColumnIndex].link]);
+							}
 							selectedColumnIndex = index;
 							loadArticleContent(article.link);
 						}}
@@ -672,7 +795,7 @@ $effect(() => {
 									<Badge variant="secondary">{article.source}</Badge>
 									<span class="text-xs text-muted-foreground">{article.published}</span>
 								</div>
-								<h3 class="line-clamp-2 text-base font-semibold leading-snug">{article.title}</h3>
+								<h3 class="line-clamp-2 text-base leading-snug">{article.title}</h3>
 							</div>
 							<Button
 								variant="ghost"
