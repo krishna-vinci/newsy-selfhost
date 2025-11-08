@@ -201,6 +201,13 @@ async def init_db():
         value TEXT NOT NULL
     );
     """)
+    await conn.execute("""
+    CREATE TABLE IF NOT EXISTS user_article_status (
+        article_link TEXT PRIMARY KEY,
+        is_read BOOLEAN DEFAULT true NOT NULL,
+        read_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    );
+    """)
     
     # Add ntfy_enabled column if it doesn't exist (migration for existing databases)
     try:
@@ -1231,6 +1238,80 @@ async def star_article(request: Request):
     
     except Exception as e:
         logging.exception("Error updating starred status: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.post("/api/articles/statuses")
+async def get_articles_statuses(request: Request):
+    """Fetch read status for a list of article links."""
+    try:
+        body = await request.json()
+        links = body.get("links", [])
+        
+        if not links:
+            return JSONResponse({})
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Fetch read statuses for the provided links
+            rows = await conn.fetch(
+                'SELECT article_link, is_read FROM user_article_status WHERE article_link = ANY($1)',
+                links
+            )
+            
+            # Build a dictionary of link -> is_read
+            statuses = {row['article_link']: row['is_read'] for row in rows}
+            
+            return JSONResponse(statuses)
+        
+        except asyncpg.PostgresError as e:
+            logging.exception("Database error fetching article statuses: %s", str(e))
+            return JSONResponse({"error": "Database error"}, status_code=500)
+        finally:
+            await conn.close()
+    
+    except Exception as e:
+        logging.exception("Error fetching article statuses: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.post("/api/articles/mark-as-read")
+async def mark_articles_as_read(request: Request):
+    """Mark one or more articles as read."""
+    try:
+        body = await request.json()
+        links = body.get("links", [])
+        
+        if not links:
+            return JSONResponse({"message": "No links provided"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Insert or update read status for each link
+            for link in links:
+                await conn.execute(
+                    '''
+                    INSERT INTO user_article_status (article_link, is_read, read_at)
+                    VALUES ($1, true, CURRENT_TIMESTAMP)
+                    ON CONFLICT (article_link) 
+                    DO UPDATE SET is_read = true, read_at = CURRENT_TIMESTAMP
+                    ''',
+                    link
+                )
+            
+            return JSONResponse({
+                "message": f"Marked {len(links)} article(s) as read",
+                "count": len(links)
+            })
+        
+        except asyncpg.PostgresError as e:
+            logging.exception("Database error marking articles as read: %s", str(e))
+            return JSONResponse({"error": "Database error"}, status_code=500)
+        finally:
+            await conn.close()
+    
+    except Exception as e:
+        logging.exception("Error marking articles as read: %s", str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/add-feed")

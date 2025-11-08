@@ -6,7 +6,7 @@ markdown2
 html2text
 newspaper3k
 python-dotenv
-fastapi
+fastapi[standard]
 starlette
 fastapi-cache2[redis]
 asyncpg

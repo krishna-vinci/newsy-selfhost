@@ -3,32 +3,35 @@ services:
     build: .
     ports:
       - "8321:8321"
-    environment:
-      - DATABASE_URL=postgresql://krishna:1122@rss_newsapp_db:5432/youtube_cm
-      - PIXABAY_API_KEY=49326456-41725d5dc7f4b0f0e4f587cc9
-      - RSSBRIDGE_HOST=https://rssbridge.krishna.quest
-      - METUBE_URL=https://metube.krishna.quest
-      - NITTER_URL=https://nitter.space
-      - PROJECTS_ROOT=/app/data/youtube-videos
-      - DAILY_REPORT_DIR=/app/data/daily_report
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    volumes:
-      - /mnt/youtube-cm/youtube-data:/app/data
-      - .:/app
+    env_file:
+      - .env
+    # --- Development with Hot-Reload ---
+    # Uncomment the 'command' and 'develop' sections below to enable hot-reloading, disable both for production.
+    # When enabled, changes to your local files will be synced to the container,
+    # and the FastAPI server will automatically restart.
+    # Run with `docker-compose up --build --watch`.
+    # For production, comment out the 'command' and 'develop' sections.
+    command: ["fastapi", "dev", "main.py", "--host", "0.0.0.0", "--port", "8321"]
+    develop:
+      watch:
+        - action: sync
+          path: .
+          target: /app
+          # This 'watch' block replaces the need for a 'volumes' bind mount in development.
+
     restart: unless-stopped
     networks:
       - db-net
     depends_on:
-      - rss_newsapp_db
+      - newsy_db
       - redis
 
-  rss_newsapp_db:
+  newsy_db:
     image: postgres:alpine
     environment:
-      - POSTGRES_USER=krishna
+      - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=1122
-      - POSTGRES_DB=youtube_cm
+      - POSTGRES_DB=newsy
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
