@@ -1,13 +1,18 @@
 <script lang="ts">
 import { onMount } from 'svelte';
+import { goto } from '$app/navigation';
 import { toast } from 'svelte-sonner';
+import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 import Button from '$lib/components/ui/button/index.svelte';
 import Input from '$lib/components/ui/input/index.svelte';
 import Checkbox from '$lib/components/ui/checkbox/index.svelte';
 import * as Select from '$lib/components/ui/select/index.js';
-import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText } from '@lucide/svelte';
+import * as Switch from '$lib/components/ui/switch/index.ts';
+import * as Tabs from '$lib/components/ui/tabs/index.js';
+import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash } from '@lucide/svelte';
 import { dndzone } from 'svelte-dnd-action';
+import { settings } from '$lib/stores/settings';
 
 
 type Feed = {
@@ -24,6 +29,9 @@ type Category = {
 	name: string;
 	priority: number;
 	is_default: boolean;
+	ntfy_enabled: boolean;
+	ai_prompt: string | null;
+	ai_enabled: boolean;
 };
 
 type FeedConfig = Record<string, Feed[]>;
@@ -54,6 +62,17 @@ let editingFeedCategory = $state('');
 // Category settings modal state
 let showCategorySettingsModal = $state(false);
 let categoriesList = $state<Category[]>([]);
+let canCloseModal = $state(true);
+let activeTab = $state('categories');
+
+// Timezone settings state
+let selectedTimezone = $state('Asia/Kolkata');
+
+// Backup & Export state
+let backups = $state<any[]>([]);
+let isLoadingBackups = $state(false);
+let isCreatingBackup = $state(false);
+let isRestoringBackup = $state(false);
 
 // Add feed form state
 let newFeedUrl = $state('');
@@ -258,11 +277,20 @@ async function deleteFeed(feedId: number) {
 // Category Settings Functions
 function openCategorySettings() {
 	loadCategories();
+	loadBackups(); // Load backups when opening settings
+	activeTab = 'categories'; // Reset to categories tab
 	showCategorySettingsModal = true;
+	canCloseModal = false;
+	// Allow closing after a short delay to prevent accidental closes
+	setTimeout(() => {
+		canCloseModal = true;
+	}, 100);
 }
 
 function closeCategorySettings() {
-	showCategorySettingsModal = false;
+	if (canCloseModal) {
+		showCategorySettingsModal = false;
+	}
 }
 
 async function handleDndConsider(e: CustomEvent) {
@@ -318,14 +346,254 @@ async function deleteCategory(categoryId: number) {
 	}
 }
 
+async function toggleCategoryNtfy(category: Category) {
+	const previousEnabled = category.ntfy_enabled;
+	category.ntfy_enabled = !category.ntfy_enabled;
+	
+	try {
+		const response = await fetch(`/api/category/${category.id}/ntfy`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				ntfy_enabled: category.ntfy_enabled
+			})
+		});
+		
+		if (!response.ok) throw new Error('Failed to update ntfy setting');
+		toast.success(category.ntfy_enabled ? 'Ntfy notifications enabled' : 'Ntfy notifications disabled');
+	} catch (error) {
+		category.ntfy_enabled = previousEnabled;
+		toast.error('Failed to update ntfy setting');
+	}
+}
+
+// AI Filter Functions
+async function toggleCategoryAI(category: Category) {
+	const previousEnabled = category.ai_enabled;
+	category.ai_enabled = !category.ai_enabled;
+	
+	try {
+		const response = await fetch(`/api/category/${category.id}/ai-settings`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				ai_prompt: category.ai_prompt,
+				ai_enabled: category.ai_enabled
+			})
+		});
+		
+		if (!response.ok) throw new Error('Failed to update AI filter setting');
+		
+		if (category.ai_enabled) {
+			toast.success('AI filter enabled. New articles will be filtered automatically.');
+		} else {
+			toast.success('AI filter disabled.');
+		}
+	} catch (error) {
+		category.ai_enabled = previousEnabled;
+		toast.error('Failed to update AI filter setting');
+	}
+}
+
+async function saveAIPrompt(category: Category, prompt: string) {
+	const previousPrompt = category.ai_prompt;
+	category.ai_prompt = prompt;
+	
+	try {
+		const response = await fetch(`/api/category/${category.id}/ai-settings`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				ai_prompt: prompt,
+				ai_enabled: category.ai_enabled
+			})
+		});
+		
+		if (!response.ok) throw new Error('Failed to save AI prompt');
+		
+		toast.success('AI prompt saved. New articles will be filtered automatically.');
+	} catch (error) {
+		category.ai_prompt = previousPrompt;
+		toast.error('Failed to save AI prompt');
+	}
+}
+
+async function reprocessCategory(categoryId: number) {
+	try {
+		toast.info('Starting reprocessing...');
+		const response = await fetch(`/api/category/${categoryId}/reprocess-ai-filter`, {
+			method: 'POST'
+		});
+		
+		if (!response.ok) throw new Error('Failed to reprocess category');
+		
+		const result = await response.json();
+		toast.success(`Reprocessing complete! ${result.stats.matched} of ${result.stats.total} articles matched`);
+	} catch (error) {
+		toast.error('Failed to reprocess category');
+	}
+}
+
+async function updateTimezone(timezone: string) {
+	const success = await settings.updateTimezone(timezone);
+	if (success) {
+		selectedTimezone = timezone;
+		toast.success('Timezone updated successfully');
+		// Trigger config changed to reload feeds with new timezone
+		onconfigchanged();
+	} else {
+		toast.error('Failed to update timezone');
+	}
+}
+
+// Backup & Export Functions
+async function loadBackups() {
+	isLoadingBackups = true;
+	try {
+		const response = await fetch('/api/backups');
+		if (response.ok) {
+			backups = await response.json();
+		}
+	} catch (error) {
+		toast.error('Failed to load backups');
+		console.error(error);
+	} finally {
+		isLoadingBackups = false;
+	}
+}
+
+async function createBackup() {
+	isCreatingBackup = true;
+	try {
+		const response = await fetch('/api/backups', { method: 'POST' });
+		if (response.ok) {
+			toast.success('Backup created successfully');
+			await loadBackups();
+		} else {
+			toast.error('Failed to create backup');
+		}
+	} catch (error) {
+		toast.error('Failed to create backup');
+		console.error(error);
+	} finally {
+		isCreatingBackup = false;
+	}
+}
+
+async function downloadBackup(filename: string) {
+	try {
+		window.open(`/api/backups/download/${filename}`, '_blank');
+	} catch (error) {
+		toast.error('Failed to download backup');
+	}
+}
+
+async function deleteBackup(filename: string) {
+	if (!confirm(`Are you sure you want to delete ${filename}?`)) return;
+	
+	try {
+		const response = await fetch(`/api/backups/${filename}`, { method: 'DELETE' });
+		if (response.ok) {
+			toast.success('Backup deleted');
+			await loadBackups();
+		} else {
+			toast.error('Failed to delete backup');
+		}
+	} catch (error) {
+		toast.error('Failed to delete backup');
+	}
+}
+
+async function restoreBackup(filename: string) {
+	if (!confirm(`WARNING: This will replace your current database with this backup. Are you sure?`)) return;
+	
+	isRestoringBackup = true;
+	try {
+		const response = await fetch('/api/backups/restore', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ filename })
+		});
+		if (response.ok) {
+			toast.success('Database restored successfully. Reloading...');
+			setTimeout(() => window.location.reload(), 2000);
+		} else {
+			toast.error('Failed to restore backup');
+		}
+	} catch (error) {
+		toast.error('Failed to restore backup');
+	} finally {
+		isRestoringBackup = false;
+	}
+}
+
+async function exportArticles(format: 'csv' | 'json') {
+	try {
+		window.open(`/api/export/articles?format=${format}`, '_blank');
+		toast.success(`Exporting articles as ${format.toUpperCase()}...`);
+	} catch (error) {
+		toast.error('Failed to export articles');
+	}
+}
+
+async function exportOPML() {
+	try {
+		window.open('/api/opml/export', '_blank');
+		toast.success('Exporting feeds as OPML...');
+	} catch (error) {
+		toast.error('Failed to export OPML');
+	}
+}
+
+async function importOPML(event: Event) {
+	const input = event.target as HTMLInputElement;
+	const file = input.files?.[0];
+	if (!file) return;
+	
+	const formData = new FormData();
+	formData.append('file', file);
+	
+	try {
+		const response = await fetch('/api/opml/import', {
+			method: 'POST',
+			body: formData
+		});
+		
+		if (response.ok) {
+			const result = await response.json();
+			toast.success(`Imported ${result.imported} feeds (${result.skipped} skipped)`);
+			await loadFeedConfig();
+			onconfigchanged();
+		} else {
+			toast.error('Failed to import OPML');
+		}
+	} catch (error) {
+		toast.error('Failed to import OPML');
+		console.error(error);
+	}
+	
+	// Reset input
+	input.value = '';
+}
 
 function handleCategoryClick(category: string) {
 	onCategorySelect(category);
 }
 
 // Lifecycle
-onMount(() => {
+onMount(async () => {
 	loadFeedConfig();
+	await settings.load();
+	
+	// Subscribe to settings changes
+	const unsubscribe = settings.subscribe(s => {
+		selectedTimezone = s.timezone;
+	});
+	
+	// Cleanup subscription on unmount
+	return () => {
+		unsubscribe();
+	};
 });
 </script>
 
@@ -344,7 +612,7 @@ onMount(() => {
 				</Sidebar.MenuItem>
 				<Sidebar.MenuItem>
 					<Sidebar.MenuButton
-						href="/reports"
+						onclick={() => goto('/reports')}
 					>
 						<FileText class="mr-2 h-4 w-4" />
 						<span>Reports</span>
@@ -596,43 +864,379 @@ onMount(() => {
 {#if showCategorySettingsModal}
 	<div
 		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+		role="presentation"
 		onclick={(e) => {
-			if (e.target === e.currentTarget) closeCategorySettings();
+			if (e.target === e.currentTarget && canCloseModal) {
+				closeCategorySettings();
+			}
 		}}
 	>
-		<div class="w-full max-w-lg rounded-lg bg-card p-6 shadow-lg">
-			<h3 class="mb-4 text-lg font-semibold">Manage Categories</h3>
+		<div class="w-full max-w-5xl rounded-lg bg-card p-6 shadow-lg">
+			<h3 class="mb-4 text-lg font-semibold">Settings</h3>
 
-			<div
-				class="mb-4 max-h-[60vh] overflow-y-auto"
-				use:dndzone={{ items: categoriesList }}
-				onconsider={handleDndConsider}
-				onfinalize={handleDndFinalize}
-			>
-				{#each categoriesList as category (category.id)}
+			<Tabs.Root bind:value={activeTab} class="w-full">
+				<Tabs.List class="grid w-full grid-cols-4">
+					<Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
+					<Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
+					<Tabs.Trigger value="timezone">Timezone</Tabs.Trigger>
+					<Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
+				</Tabs.List>
+
+				<!-- Categories Tab -->
+				<Tabs.Content value="categories" class="mt-4 min-h-[400px]">
 					<div
-						class="mb-2 flex items-center gap-2 rounded-md bg-background p-2"
+						class="mb-4 max-h-[60vh] overflow-y-auto"
+						use:dndzone={{ items: categoriesList }}
+						onconsider={handleDndConsider}
+						onfinalize={handleDndFinalize}
 					>
-						<GripVertical class="h-5 w-5 cursor-grab text-muted-foreground" />
-						<span class="flex-1 font-medium">{category.name}</span>
-						<Button
-							variant={category.is_default ? 'secondary' : 'ghost'}
-							size="sm"
-							onclick={() => setDefaultCategory(category.id)}
-						>
-							{category.is_default ? 'Default' : 'Set Default'}
-						</Button>
-						<Button
-							variant="ghost"
-							size="icon"
-							class="h-8 w-8"
-							onclick={() => deleteCategory(category.id)}
-						>
-							<Trash2 class="h-4 w-4" />
-						</Button>
+						{#each categoriesList as category (category.id)}
+							{@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
+							<div class="mb-3 rounded-md bg-background p-3 border border-border">
+								<div class="flex items-center gap-4">
+									<GripVertical class="h-5 w-5 cursor-grab text-muted-foreground flex-shrink-0" />
+									<span class="font-medium flex-grow min-w-0 truncate">{category.name}</span>
+
+									<div class="flex items-center justify-between gap-2 w-[320px] flex-shrink-0">
+										<span class="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded truncate">
+											{topicName}
+										</span>
+										<Button
+											variant="ghost"
+											size="icon"
+											class="h-6 w-6"
+											onclick={() => copyToClipboard(topicName, 'Topic copied to clipboard')}
+										>
+											<Copy class="h-3 w-3" />
+										</Button>
+									</div>
+
+									<div class="flex items-center gap-2 w-[120px] flex-shrink-0">
+										<Bell class="h-4 w-4 text-muted-foreground" />
+										<Switch.Switch
+											checked={category.ntfy_enabled}
+											onCheckedChange={() => toggleCategoryNtfy(category)}
+										/>
+										<span class="text-xs text-muted-foreground w-6">{category.ntfy_enabled ? 'On' : 'Off'}</span>
+									</div>
+
+									<div class="flex items-center gap-2 w-[180px] flex-shrink-0 justify-end">
+										<Button
+											variant={category.is_default ? 'secondary' : 'ghost'}
+											size="sm"
+											class="text-xs"
+											onclick={() => setDefaultCategory(category.id)}
+										>
+											{category.is_default ? 'Default' : 'Set Default'}
+										</Button>
+										<Button
+											variant="ghost"
+											size="icon"
+											class="h-8 w-8 flex-shrink-0"
+											onclick={() => deleteCategory(category.id)}
+										>
+											<Trash2 class="h-4 w-4" />
+										</Button>
+									</div>
+								</div>
+							</div>
+						{/each}
 					</div>
-				{/each}
-			</div>
+				</Tabs.Content>
+
+				<!-- AI Filters Tab -->
+				<Tabs.Content value="ai-filters" class="mt-4 min-h-[400px]">
+					<div class="space-y-4 p-4">
+						<div class="mb-4">
+							<h4 class="text-sm font-semibold mb-2">AI-Powered Content Filtering</h4>
+							<p class="text-sm text-muted-foreground">
+								Use AI to filter articles based on your interests. When enabled, <strong>only new incoming articles</strong> will be filtered automatically. Use "Reprocess Articles" to filter existing articles.
+							</p>
+						</div>
+
+						<div class="space-y-4 max-h-[60vh] overflow-y-auto">
+							{#each categoriesList as category (category.id)}
+								<div class="rounded-lg border border-border bg-background p-4 space-y-3">
+									<!-- Header with Category Name and Toggle -->
+									<div class="flex items-center justify-between">
+										<div class="flex items-center gap-3">
+											<h5 class="font-medium">{category.name}</h5>
+											{#if category.ai_enabled}
+												<span class="text-xs bg-green-500/10 text-green-500 px-2 py-1 rounded">Active</span>
+											{:else}
+												<span class="text-xs bg-muted text-muted-foreground px-2 py-1 rounded">Inactive</span>
+											{/if}
+										</div>
+										<Switch.Switch
+											checked={category.ai_enabled}
+											onCheckedChange={() => toggleCategoryAI(category)}
+										/>
+									</div>
+
+									<!-- Prompt Input -->
+									{#if category.ai_enabled || category.ai_prompt}
+										<div class="space-y-2">
+											<label class="text-xs font-medium text-muted-foreground">Filter Prompt</label>
+											<textarea
+												bind:value={category.ai_prompt}
+												placeholder="e.g., I'm interested in articles about artificial intelligence, machine learning, and software development..."
+												class="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none"
+												onblur={() => {
+													if (category.ai_prompt !== null && category.ai_prompt.trim() !== '') {
+														saveAIPrompt(category, category.ai_prompt);
+													}
+												}}
+											></textarea>
+											<p class="text-xs text-muted-foreground">
+												Describe what types of articles you want to see. Be specific for better results.
+											</p>
+										</div>
+
+										<!-- Action Buttons -->
+										<div class="flex gap-2">
+											<Button
+												size="sm"
+												variant="outline"
+												onclick={() => {
+													if (category.ai_prompt) {
+														saveAIPrompt(category, category.ai_prompt);
+													}
+												}}
+												disabled={!category.ai_prompt || category.ai_prompt.trim() === ''}
+											>
+												Save Prompt
+											</Button>
+											<Button
+												size="sm"
+												variant="secondary"
+												onclick={() => reprocessCategory(category.id)}
+												disabled={!category.ai_enabled || !category.ai_prompt}
+												title="Filter existing articles with current prompt"
+											>
+												Reprocess Existing Articles
+											</Button>
+										</div>
+									{/if}
+
+									{#if !category.ai_enabled && !category.ai_prompt}
+										<p class="text-xs text-muted-foreground italic">
+											Enable AI filtering to define a custom prompt for this category.
+										</p>
+									{/if}
+								</div>
+							{/each}
+						</div>
+
+						<!-- Info Box -->
+						<div class="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-2">
+							<p><strong>How it works:</strong></p>
+							<ul class="list-disc list-inside space-y-1 ml-2">
+								<li><strong>New articles:</strong> Automatically filtered when they arrive (if AI enabled)</li>
+								<li><strong>Existing articles:</strong> Click "Reprocess" to filter them (costs API calls)</li>
+								<li>Be specific about topics you're interested in for better results</li>
+								<li>Keep prompts under 500 characters</li>
+							</ul>
+						</div>
+					</div>
+				</Tabs.Content>
+
+				<!-- Timezone Tab -->
+				<Tabs.Content value="timezone" class="mt-4 min-h-[400px]">
+					<div class="space-y-4 p-4">
+						<div>
+							<h4 class="text-sm font-medium mb-2">Select Your Timezone</h4>
+							<p class="text-sm text-muted-foreground mb-4">
+								Choose your preferred timezone for displaying article timestamps.
+							</p>
+						</div>
+
+						<div class="space-y-2">
+							<label class="text-sm font-medium">Timezone</label>
+							<Select.Root type="single" bind:value={selectedTimezone}>
+								<Select.Trigger class="w-full">
+									{selectedTimezone === 'Asia/Kolkata' ? 'IST (Asia/Kolkata)' : 'UTC'}
+								</Select.Trigger>
+								<Select.Content>
+									<Select.Item value="Asia/Kolkata" onclick={() => updateTimezone('Asia/Kolkata')}>
+										IST (Asia/Kolkata)
+									</Select.Item>
+									<Select.Item value="UTC" onclick={() => updateTimezone('UTC')}>
+										UTC
+									</Select.Item>
+								</Select.Content>
+							</Select.Root>
+						</div>
+
+						<div class="rounded-md bg-muted p-3 text-sm text-muted-foreground">
+							<p><strong>Note:</strong> Changing the timezone will update how article timestamps are displayed throughout the application.</p>
+						</div>
+					</div>
+				</Tabs.Content>
+
+				<!-- Backup & Export Tab -->
+				<Tabs.Content value="backup" class="mt-4 min-h-[400px]">
+					<div class="space-y-6 p-4">
+						<!-- Database Backups Section -->
+						<div class="space-y-4">
+							<div class="flex items-center justify-between">
+								<div>
+									<h4 class="text-sm font-semibold flex items-center gap-2">
+										<Database class="h-4 w-4" />
+										Database Backups
+									</h4>
+									<p class="text-xs text-muted-foreground mt-1">
+										Create and manage full database backups for disaster recovery
+									</p>
+								</div>
+								<Button
+									onclick={createBackup}
+									disabled={isCreatingBackup}
+									size="sm"
+									class="gap-2"
+								>
+									{#if isCreatingBackup}
+										<Loader2 class="h-4 w-4 animate-spin" />
+										Creating...
+									{:else}
+										<Plus class="h-4 w-4" />
+										Create Backup
+									{/if}
+								</Button>
+							</div>
+
+							{#if activeTab === 'backup'}
+								{#if !backups.length && !isLoadingBackups}
+									<div class="rounded-md border border-dashed p-8 text-center">
+										<Database class="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+										<p class="text-sm text-muted-foreground">No backups available</p>
+										<p class="text-xs text-muted-foreground mt-1">Create your first backup to get started</p>
+									</div>
+								{:else}
+									<div class="space-y-2 max-h-[200px] overflow-y-auto">
+										{#each backups as backup}
+											<div class="flex items-center justify-between rounded-md border p-3 bg-background">
+												<div class="flex-1 min-w-0">
+													<p class="text-sm font-medium truncate">{backup.filename}</p>
+													<p class="text-xs text-muted-foreground">
+														{new Date(backup.created_at).toLocaleString()} • {backup.size_mb} MB
+													</p>
+												</div>
+												<div class="flex items-center gap-1 ml-2">
+													<Button
+														variant="ghost"
+														size="icon"
+														class="h-8 w-8"
+														onclick={() => downloadBackup(backup.filename)}
+													>
+														<Download class="h-4 w-4" />
+													</Button>
+													<Button
+														variant="ghost"
+														size="icon"
+														class="h-8 w-8"
+														onclick={() => restoreBackup(backup.filename)}
+														disabled={isRestoringBackup}
+													>
+														<Upload class="h-4 w-4" />
+													</Button>
+													<Button
+														variant="ghost"
+														size="icon"
+														class="h-8 w-8 text-destructive"
+														onclick={() => deleteBackup(backup.filename)}
+													>
+														<Trash class="h-4 w-4" />
+													</Button>
+												</div>
+											</div>
+										{/each}
+									</div>
+								{/if}
+							{/if}
+						</div>
+
+						<!-- Data Export Section -->
+						<div class="space-y-4 pt-4 border-t">
+							<div>
+								<h4 class="text-sm font-semibold flex items-center gap-2">
+									<FileDown class="h-4 w-4" />
+									Export Articles
+								</h4>
+								<p class="text-xs text-muted-foreground mt-1">
+									Download your articles in portable formats
+								</p>
+							</div>
+							<div class="flex gap-2">
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => exportArticles('csv')}
+									class="gap-2"
+								>
+									<FileDown class="h-4 w-4" />
+									Export as CSV
+								</Button>
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={() => exportArticles('json')}
+									class="gap-2"
+								>
+									<FileDown class="h-4 w-4" />
+									Export as JSON
+								</Button>
+							</div>
+						</div>
+
+						<!-- OPML Import/Export Section -->
+						<div class="space-y-4 pt-4 border-t">
+							<div>
+								<h4 class="text-sm font-semibold flex items-center gap-2">
+									<FileText class="h-4 w-4" />
+									OPML Feed Migration
+								</h4>
+								<p class="text-xs text-muted-foreground mt-1">
+									Import or export your feed subscriptions
+								</p>
+							</div>
+							<div class="flex gap-2">
+								<Button
+									variant="outline"
+									size="sm"
+									onclick={exportOPML}
+									class="gap-2"
+								>
+									<FileDown class="h-4 w-4" />
+									Export OPML
+								</Button>
+								<label class="cursor-pointer">
+									<input
+										type="file"
+										accept=".opml,.xml"
+										onchange={importOPML}
+										class="hidden"
+									/>
+									<Button
+										variant="outline"
+										size="sm"
+										class="gap-2"
+										onclick={(e) => {
+											e.preventDefault();
+											(e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement)?.click();
+										}}
+									>
+										<FileUp class="h-4 w-4" />
+										Import OPML
+									</Button>
+								</label>
+							</div>
+							<div class="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+								<p><strong>Note:</strong> Categorized feeds will be imported into matching categories. Uncategorized feeds will be placed in a "Feeds" category. Duplicate feeds will be skipped.</p>
+							</div>
+						</div>
+					</div>
+				</Tabs.Content>
+			</Tabs.Root>
 
 			<div class="mt-6 flex justify-end">
 				<Button variant="outline" onclick={closeCategorySettings}>Close</Button>

@@ -1,8 +1,9 @@
 <script lang="ts">
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
-import { Copy, Eye, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText } from '@lucide/svelte';
+import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
+import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import Button from '$lib/components/ui/button/index.svelte';
 import Badge from '$lib/components/ui/badge/index.svelte';
 import Separator from '$lib/components/ui/separator/index.svelte';
@@ -24,6 +25,8 @@ import FeedSidebar from '$lib/components/FeedSidebar.svelte';
 		published_datetime: string;
 		source: string;
 		starred: boolean;
+		category: string;
+		is_read?: boolean;
 	};
 	type Category = {
 		category: string;
@@ -45,6 +48,26 @@ let searchResults = $state<Category[]>([]);
 let isSearchMode = $state<boolean>(false);
 let isStarredViewActive = $state<boolean>(false);
 let isGeneratingReport = $state<boolean>(false);
+let hideReadArticles = $state<boolean>(false);
+let readStatuses = $state<Record<string, boolean>>({});
+let viewType = $state<'standard' | 'ai'>('standard');
+
+// Pagination state
+let allArticles = $state<FeedItem[]>([]);
+let currentOffset = $state<number>(0);
+let hasMore = $state<boolean>(true);
+let isLoadingMore = $state<boolean>(false);
+let totalArticles = $state<number>(0);
+const INITIAL_LOAD = 100;
+const LOAD_MORE_SIZE = 50;
+
+// Helper function to merge articles with read statuses
+function mergeWithReadStatus(articles: FeedItem[]): FeedItem[] {
+	return articles.map(article => ({
+		...article,
+		is_read: readStatuses[article.link] || false
+	}));
+}
 
 // Derived
 const categories = $derived(data.categories as Category[] || []);
@@ -52,11 +75,25 @@ const categories = $derived(data.categories as Category[] || []);
 // Use search results if in search mode, otherwise use original categories
 const displayCategories = $derived(isSearchMode ? searchResults : categories);
 
-const filteredArticles = $derived(
-		selectedCategory === 'all'
+// Use paginated articles if available, otherwise fall back to category-grouped data
+const baseFilteredArticles = $derived.by(() => {
+	const articles = allArticles.length > 0 
+		? (selectedCategory === 'all' 
+			? allArticles 
+			: allArticles.filter(article => article.category === selectedCategory))
+		: (selectedCategory === 'all'
 			? displayCategories.flatMap(cat => cat.feed_items)
-			: displayCategories.find(cat => cat.category === selectedCategory)?.feed_items || []
-	);
+			: displayCategories.find(cat => cat.category === selectedCategory)?.feed_items || []);
+	
+	return mergeWithReadStatus(articles);
+});
+
+// Filter out read articles if hideReadArticles is enabled
+const filteredArticles = $derived(
+	hideReadArticles 
+		? baseFilteredArticles.filter(article => !article.is_read)
+		: baseFilteredArticles
+);
 
 // Total search result count (only relevant when searching)
 const searchResultCount = $derived(
@@ -64,30 +101,6 @@ const searchResultCount = $derived(
 );
 
 	// Functions
-	function copyToClipboard(url: string) {
-		if (navigator.clipboard && window.isSecureContext) {
-			navigator.clipboard.writeText(url)
-				.then(() => toast.success('Link copied to clipboard!'))
-				.catch(() => toast.error('Failed to copy link'));
-		} else {
-			// Fallback for non-secure contexts
-			const textArea = document.createElement('textarea');
-			textArea.value = url;
-			textArea.style.position = 'absolute';
-			textArea.style.left = '-9999px';
-			document.body.appendChild(textArea);
-			textArea.select();
-			try {
-				document.execCommand('copy');
-				toast.success('Link copied to clipboard!');
-			} catch (err) {
-				toast.error('Failed to copy link');
-			} finally {
-				document.body.removeChild(textArea);
-			}
-		}
-	}
-
 	async function loadArticleContent(url: string) {
 		isLoadingContent = true;
 		articleContent = '';
@@ -110,14 +123,14 @@ const searchResultCount = $derived(
 		selectedArticle = article;
 		modalOpen = true;
 		loadArticleContent(article.link);
+		// Mark as read when viewing
+		markAsRead([article.link]);
 	}
 
 function handleCategorySelect(category: string) {
-selectedCategory = category;
-// Re-fetch data with current filters (search, starred, etc.)
-if (searchQuery.trim() || isStarredViewActive) {
-	fetchFeedsData();
-}
+	selectedCategory = category;
+	// Load initial articles with pagination
+	loadInitialArticles();
 }
 
 async function handleConfigChanged() {
@@ -126,18 +139,15 @@ await invalidateAll();
 
 async function performSearch(query: string) {
 	if (!query.trim()) {
-		// Clear search - but keep starred view if active
-		isSearchMode = isStarredViewActive;
+		// Clear search - reload initial articles
+		isSearchMode = false;
 		searchResults = [];
-		if (!isStarredViewActive) {
-			await invalidateAll();
-		} else {
-			await fetchFeedsData();
-		}
+		await loadInitialArticles();
 		return;
 	}
 	
-	await fetchFeedsData();
+	// Reload with search query
+	await loadInitialArticles();
 }
 
 function handleSearchInput(event: Event) {
@@ -156,28 +166,99 @@ function handleSearchInput(event: Event) {
 
 async function clearSearch() {
 	searchQuery = '';
-	// Keep starred view active if it was on
-	if (isStarredViewActive) {
-		await fetchFeedsData();
-	} else {
-		isSearchMode = false;
-		searchResults = [];
-		await invalidateAll();
-	}
+	isSearchMode = false;
+	searchResults = [];
+	await loadInitialArticles();
 }
 
 async function toggleStarredView() {
 	isStarredViewActive = !isStarredViewActive;
-	await fetchFeedsData();
+	await loadInitialArticles();
+}
+
+async function toggleHideReadArticles() {
+	hideReadArticles = !hideReadArticles;
+}
+
+async function toggleViewType() {
+	viewType = viewType === 'standard' ? 'ai' : 'standard';
+	await loadInitialArticles();
+}
+
+async function loadInitialArticles() {
+	// Reset pagination state
+	currentOffset = 0;
+	allArticles = [];
+	hasMore = true;
+	
+	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
+	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
+	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	const viewParam = `&view=${viewType}`;
+	
+	try {
+		const response = await fetch(`/api/feeds?days=2&limit=${INITIAL_LOAD}&offset=0${categoryParam}${searchParam}${starredParam}${viewParam}`);
+		if (!response.ok) throw new Error('Failed to fetch feeds');
+		
+		const data = await response.json();
+		
+		// Check if response is paginated format
+		if (data.articles && Array.isArray(data.articles)) {
+			allArticles = data.articles;
+			totalArticles = data.total;
+			hasMore = data.has_more;
+			currentOffset = INITIAL_LOAD;
+			// Fetch read statuses for loaded articles
+			await fetchReadStatuses(data.articles);
+		} else {
+			// Fallback to old format (shouldn't happen with limit param)
+			console.warn('Unexpected response format');
+		}
+	} catch (error) {
+		console.error('Error loading articles:', error);
+		toast.error('Failed to load articles');
+	}
+}
+
+async function loadMoreArticles() {
+	if (isLoadingMore || !hasMore) return;
+	
+	isLoadingMore = true;
+	
+	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
+	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
+	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	const viewParam = `&view=${viewType}`;
+	
+	try {
+		const response = await fetch(`/api/feeds?days=2&limit=${LOAD_MORE_SIZE}&offset=${currentOffset}${categoryParam}${searchParam}${starredParam}${viewParam}`);
+		if (!response.ok) throw new Error('Failed to fetch more articles');
+		
+		const data = await response.json();
+		
+		if (data.articles && Array.isArray(data.articles)) {
+			// Fetch read statuses for new articles
+			await fetchReadStatuses(data.articles);
+			allArticles = [...allArticles, ...data.articles];
+			hasMore = data.has_more;
+			currentOffset += data.articles.length;
+		}
+	} catch (error) {
+		console.error('Error loading more articles:', error);
+		toast.error('Failed to load more articles');
+	} finally {
+		isLoadingMore = false;
+	}
 }
 
 async function fetchFeedsData() {
 	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
 	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
 	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	const viewParam = `&view=${viewType}`;
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2${categoryParam}${searchParam}${starredParam}`);
+		const response = await fetch(`/api/feeds?days=2${categoryParam}${searchParam}${starredParam}${viewParam}`);
 		if (!response.ok) throw new Error('Failed to fetch feeds');
 		
 		const results = await response.json();
@@ -221,6 +302,9 @@ async function toggleArticleStar(article: FeedItem, event?: Event) {
 		
 		toast.success(article.starred ? 'Article starred!' : 'Article unstarred');
 		
+		// Mark as read when starring
+		await markAsRead([article.link]);
+		
 		// If in starred view and article was unstarred, refresh to remove it
 		if (isStarredViewActive && !article.starred) {
 			await fetchFeedsData();
@@ -233,16 +317,75 @@ async function toggleArticleStar(article: FeedItem, event?: Event) {
 	}
 }
 
+async function fetchReadStatuses(articles: FeedItem[]) {
+	if (articles.length === 0) return;
+	
+	const links = articles.map(a => a.link);
+	
+	try {
+		const response = await fetch('/api/articles/statuses', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ links })
+		});
+		
+		if (!response.ok) {
+			throw new Error('Failed to fetch read statuses');
+		}
+		
+		const statuses = await response.json();
+		
+		// Update readStatuses state for reactivity
+		readStatuses = { ...readStatuses, ...statuses };
+	} catch (error) {
+		console.error('Error fetching read statuses:', error);
+	}
+}
+
+async function markAsRead(links: string[]) {
+	if (links.length === 0) return;
+	
+	try {
+		// Optimistically update readStatuses state
+		const newStatuses = { ...readStatuses };
+		links.forEach(link => {
+			newStatuses[link] = true;
+		});
+		readStatuses = newStatuses;
+		
+		const response = await fetch('/api/articles/mark-as-read', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ links })
+		});
+		
+		if (!response.ok) {
+			throw new Error('Failed to mark articles as read');
+		}
+	} catch (error) {
+		console.error('Error marking articles as read:', error);
+		// Could revert optimistic update here if needed
+	}
+}
+
 // Keyboard navigation for column view
 function handleKeydown(event: KeyboardEvent) {
 		if (viewMode !== 'column' || filteredArticles.length === 0) return;
 		
 		if (event.key === 'ArrowDown') {
 			event.preventDefault();
+			// Mark previous article as read
+			if (filteredArticles[selectedColumnIndex]) {
+				markAsRead([filteredArticles[selectedColumnIndex].link]);
+			}
 			selectedColumnIndex = Math.min(selectedColumnIndex + 1, filteredArticles.length - 1);
 			loadArticleContent(filteredArticles[selectedColumnIndex].link);
 		} else if (event.key === 'ArrowUp') {
 			event.preventDefault();
+			// Mark previous article as read
+			if (filteredArticles[selectedColumnIndex]) {
+				markAsRead([filteredArticles[selectedColumnIndex].link]);
+			}
 			selectedColumnIndex = Math.max(selectedColumnIndex - 1, 0);
 			loadArticleContent(filteredArticles[selectedColumnIndex].link);
 		}
@@ -280,10 +423,57 @@ async function generateStarredReport() {
 
 // Initialize column view
 $effect(() => {
-if (viewMode === 'column' && filteredArticles.length > 0) {
-selectedColumnIndex = 0;
-loadArticleContent(filteredArticles[0].link);
-}
+	if (viewMode === 'column' && filteredArticles.length > 0) {
+		selectedColumnIndex = 0;
+		loadArticleContent(filteredArticles[0].link);
+	}
+});
+
+// Fetch read statuses for initial server-loaded categories data
+let hasLoadedInitialStatuses = false;
+$effect(() => {
+	if (!hasLoadedInitialStatuses && categories.length > 0) {
+		hasLoadedInitialStatuses = true;
+		const allCategoryArticles = categories.flatMap(cat => cat.feed_items);
+		if (allCategoryArticles.length > 0) {
+			fetchReadStatuses(allCategoryArticles);
+		}
+	}
+});
+
+// Load initial articles on mount (run once)
+let hasInitiallyLoaded = false;
+$effect(() => {
+	if (!hasInitiallyLoaded) {
+		hasInitiallyLoaded = true;
+		loadInitialArticles();
+	}
+});
+
+// Intersection Observer for lazy loading
+$effect(() => {
+	const trigger = document.querySelector('.load-more-trigger');
+	if (!trigger) return;
+	
+	const observer = new IntersectionObserver(
+		(entries) => {
+			const entry = entries[0];
+			if (entry.isIntersecting && hasMore && !isLoadingMore) {
+				loadMoreArticles();
+			}
+		},
+		{
+			root: null,
+			rootMargin: '200px', // Start loading 200px before reaching the trigger
+			threshold: 0.1
+		}
+	);
+	
+	observer.observe(trigger);
+	
+	return () => {
+		observer.disconnect();
+	};
 });
 </script>
 
@@ -295,14 +485,15 @@ loadArticleContent(filteredArticles[0].link);
 
 <svelte:window onkeydown={handleKeydown} />
 
-<Sidebar.Provider>
-<div class="flex min-h-screen w-full">
+<Sidebar.Provider class="h-full">
+<div class="flex w-full h-full">
 <!-- Sidebar -->
 <FeedSidebar {selectedCategory} onCategorySelect={handleCategorySelect} onconfigchanged={handleConfigChanged} />
 
 <!-- Main Content -->
-<Sidebar.Inset>
-<div class="w-full px-8 py-8">
+<Sidebar.Inset class="h-full">
+<div class="w-full h-full overflow-auto">
+<div class="px-8 py-8">
 <!-- Header -->
 <div class="mb-8 flex flex-col gap-4">
 	<div class="flex items-center justify-between gap-4">
@@ -366,6 +557,33 @@ loadArticleContent(filteredArticles[0].link);
 				<Star class="size-4" fill={isStarredViewActive ? 'currentColor' : 'none'} />
 			</Button>
 
+			<!-- Hide/Show Read Toggle -->
+			<Button
+				variant={hideReadArticles ? 'default' : 'outline'}
+				size="icon"
+				onclick={toggleHideReadArticles}
+				aria-label={hideReadArticles ? 'Show read articles' : 'Hide read articles'}
+				title={hideReadArticles ? 'Showing unread only' : 'Show all articles'}
+			>
+				{#if hideReadArticles}
+					<CheckCircle class="size-4" />
+				{:else}
+					<Circle class="size-4" />
+				{/if}
+			</Button>
+
+			<!-- AI View Toggle -->
+			<Button
+				variant={viewType === 'ai' ? 'default' : 'outline'}
+				size="icon"
+				onclick={toggleViewType}
+				aria-label={viewType === 'ai' ? 'Switch to standard view' : 'Switch to AI filtered view'}
+				title={viewType === 'ai' ? 'AI Filtered View' : 'Standard View'}
+				class={viewType === 'ai' ? 'bg-purple-500 hover:bg-purple-600' : ''}
+			>
+				<Sparkles class="size-4" />
+			</Button>
+
 			<!-- View Mode Toggle -->
 			<div class="flex gap-2">
 				<Button
@@ -425,7 +643,7 @@ loadArticleContent(filteredArticles[0].link);
 		<!-- Card View -->
 		<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
 			{#each filteredArticles as article}
-				<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg">
+				<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg {article.is_read ? 'opacity-60' : ''}">
 					<div class="flex flex-grow flex-col gap-4">
 						{#if article.thumbnail}
 							<div class="relative -mt-6 -mx-6 overflow-hidden rounded-t-xl">
@@ -445,7 +663,7 @@ loadArticleContent(filteredArticles[0].link);
 									<Badge variant="secondary">{article.source}</Badge>
 									<span class="text-xs text-muted-foreground">{article.published}</span>
 								</div>
-								<h3 class="mt-2 line-clamp-2 text-lg font-semibold leading-tight">{article.title}</h3>
+								<h3 class="mt-2 line-clamp-2 text-lg leading-tight">{article.title}</h3>
 								{#if article.description}
 									<p class="mt-1 line-clamp-3 text-sm text-muted-foreground">{article.description}</p>
 								{/if}
@@ -469,9 +687,11 @@ loadArticleContent(filteredArticles[0].link);
 								<Button
 									variant="outline"
 									size="icon-sm"
-									onclick={() => copyToClipboard(article.link)}
+									href={article.link}
+									target="_blank"
+									rel="noopener noreferrer"
 								>
-									<Copy class="size-4" />
+									<ExternalLink class="size-4" />
 								</Button>
 							</div>
 						</div>
@@ -479,14 +699,34 @@ loadArticleContent(filteredArticles[0].link);
 				</Card>
 			{/each}
 		</div>
+		
+		<!-- Load More Trigger for Card View -->
+		<div class="load-more-trigger">
+			{#if hasMore || isLoadingMore}
+				<div class="flex justify-center py-8">
+					{#if isLoadingMore}
+						<div class="flex items-center gap-2 text-muted-foreground">
+							<div class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent"></div>
+							<span>Loading more articles...</span>
+						</div>
+					{:else}
+						<span class="text-sm text-muted-foreground">Scroll for more</span>
+					{/if}
+				</div>
+			{:else if allArticles.length > 0}
+				<div class="flex justify-center py-8">
+					<span class="text-sm text-muted-foreground">No more articles</span>
+				</div>
+			{/if}
+		</div>
 	{:else if viewMode === 'headline'}
 		<!-- Headline View -->
 		<div class="mx-auto">
 			<ul class="grid grid-cols-1 gap-4 md:grid-cols-2">
 				{#each filteredArticles as article}
-					<li class="group flex items-center gap-4 rounded-lg border p-4 transition-all hover:bg-muted">
+					<li class="group flex items-center gap-4 rounded-lg border p-4 transition-all hover:bg-muted {article.is_read ? 'opacity-60' : ''}">
 						<div class="flex min-w-0 flex-1 flex-col gap-1">
-							<h3 class="font-semibold leading-snug">{article.title}</h3>
+							<h3 class="leading-snug">{article.title}</h3>
 							<div class="flex items-center gap-2 text-xs text-muted-foreground">
 								<span>{article.source}</span>
 								<span>&bull;</span>
@@ -512,14 +752,36 @@ loadArticleContent(filteredArticles[0].link);
 							<Button
 								variant="ghost"
 								size="icon-sm"
-								onclick={() => copyToClipboard(article.link)}
+								href={article.link}
+								target="_blank"
+								rel="noopener noreferrer"
 							>
-								<Copy class="size-4" />
+								<ExternalLink class="size-4" />
 							</Button>
 						</div>
 					</li>
 				{/each}
 			</ul>
+		</div>
+		
+		<!-- Load More Trigger for Headline View -->
+		<div class="load-more-trigger">
+			{#if hasMore || isLoadingMore}
+				<div class="flex justify-center py-8">
+					{#if isLoadingMore}
+						<div class="flex items-center gap-2 text-muted-foreground">
+							<div class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent"></div>
+							<span>Loading more articles...</span>
+						</div>
+					{:else}
+						<span class="text-sm text-muted-foreground">Scroll for more</span>
+					{/if}
+				</div>
+			{:else if allArticles.length > 0}
+				<div class="flex justify-center py-8">
+					<span class="text-sm text-muted-foreground">No more articles</span>
+				</div>
+			{/if}
 		</div>
 	{:else if viewMode === 'column'}
 		<!-- Column View -->
@@ -528,8 +790,12 @@ loadArticleContent(filteredArticles[0].link);
 			<div class="flex flex-col gap-2">
 				{#each filteredArticles as article, index}
 					<Card
-						class="group cursor-pointer transition-all {selectedColumnIndex === index ? 'ring-2 ring-primary' : 'hover:shadow-md'}"
+						class="group cursor-pointer transition-all {selectedColumnIndex === index ? 'ring-2 ring-primary' : 'hover:shadow-md'} {article.is_read ? 'opacity-60' : ''}"
 						onclick={() => {
+							// Mark previous article as read when switching
+							if (selectedColumnIndex !== index && filteredArticles[selectedColumnIndex]) {
+								markAsRead([filteredArticles[selectedColumnIndex].link]);
+							}
 							selectedColumnIndex = index;
 							loadArticleContent(article.link);
 						}}
@@ -550,7 +816,7 @@ loadArticleContent(filteredArticles[0].link);
 									<Badge variant="secondary">{article.source}</Badge>
 									<span class="text-xs text-muted-foreground">{article.published}</span>
 								</div>
-								<h3 class="line-clamp-2 text-base font-semibold leading-snug">{article.title}</h3>
+								<h3 class="line-clamp-2 text-base leading-snug">{article.title}</h3>
 							</div>
 							<Button
 								variant="ghost"
@@ -563,6 +829,26 @@ loadArticleContent(filteredArticles[0].link);
 						</div>
 					</Card>
 				{/each}
+				
+				<!-- Load More Trigger for Column View -->
+				<div class="load-more-trigger">
+					{#if hasMore || isLoadingMore}
+						<div class="flex justify-center py-4">
+							{#if isLoadingMore}
+								<div class="flex items-center gap-2 text-muted-foreground">
+									<div class="h-5 w-5 animate-spin rounded-full border-2 border-current border-t-transparent"></div>
+									<span>Loading more...</span>
+								</div>
+							{:else}
+								<span class="text-sm text-muted-foreground">Scroll for more</span>
+							{/if}
+						</div>
+					{:else if allArticles.length > 0}
+						<div class="flex justify-center py-4">
+							<span class="text-sm text-muted-foreground">No more articles</span>
+						</div>
+					{/if}
+				</div>
 			</div>
 
 			<!-- Article Content -->
@@ -594,7 +880,7 @@ loadArticleContent(filteredArticles[0].link);
 									<Button
 										variant="outline"
 										size="icon-sm"
-										onclick={() => copyToClipboard(filteredArticles[selectedColumnIndex].link)}
+										onclick={() => copyToClipboard(filteredArticles[selectedColumnIndex].link, 'Link copied to clipboard!')}
 									>
 										<Copy class="size-4" />
 									</Button>
@@ -620,6 +906,7 @@ loadArticleContent(filteredArticles[0].link);
 		</div>
 	{/if}
 </div>
+</div>
 </Sidebar.Inset>
 </div>
 </Sidebar.Provider>
@@ -635,7 +922,7 @@ loadArticleContent(filteredArticles[0].link);
 					<Button
 						variant="outline"
 						size="sm"
-						onclick={() => copyToClipboard(selectedArticle!.link)}
+						onclick={() => copyToClipboard(selectedArticle!.link, 'Link copied to clipboard!')}
 					>
 						<Copy class="size-4" />
 						Copy Link

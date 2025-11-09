@@ -18,7 +18,7 @@ from markdown_it import MarkdownIt
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, Request, Form, HTTPException, File, UploadFile, Query
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,9 +46,18 @@ import asyncio
 from fastapi import FastAPI
 import time
 import unicodedata
+import csv
+import io
+import subprocess
+import xml.etree.ElementTree as ET
+from typing import List
+from pydantic import BaseModel
 
 from config import Config  # Import our centralized config
 import reports  # Import reports module
+import backup_restore  # Import backup/restore/export module
+import database  # Import database module
+import ai_filter  # Import AI filtering module
 
 load_dotenv()  # Load environment variables
 
@@ -128,6 +137,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Include reports router
 app.include_router(reports.router)
 
+# Include backup/restore/export router
+app.include_router(backup_restore.router)
+
 
 def truncate_words(text, max_words=100):
     if not text:
@@ -142,132 +154,12 @@ templates.env.filters["truncate_words"] = truncate_words
 
 
 # --- Database Setup ---
-async def get_db_connection():
-    return await asyncpg.connect(
-        database=Config.DB_NAME,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD,
-        host=Config.DB_HOST,
-        port=Config.DB_PORT
-    )
-
-async def init_db():
-    conn = await get_db_connection()
-    await conn.execute("""
-    CREATE TABLE IF NOT EXISTS categories (
-        id SERIAL PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL,
-        priority INTEGER DEFAULT 0,
-        is_default BOOLEAN DEFAULT false
-    );
-    """)
-    await conn.execute("""
-    CREATE TABLE IF NOT EXISTS feeds (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        url TEXT UNIQUE NOT NULL,
-        category TEXT NOT NULL,
-        "isActive" BOOLEAN DEFAULT true,
-        priority INTEGER DEFAULT 0,
-        retention_days INTEGER
-    );
-    """)
-    await conn.execute("""
-    CREATE TABLE IF NOT EXISTS articles (
-        id SERIAL PRIMARY KEY,
-        title TEXT NOT NULL,
-        link TEXT UNIQUE NOT NULL,
-        description TEXT,
-        thumbnail TEXT,
-        published TEXT,
-        published_datetime TIMESTAMPTZ,
-        category TEXT,
-        content TEXT,
-        source TEXT,
-        feed_id INTEGER REFERENCES feeds(id) ON DELETE CASCADE,
-        starred BOOLEAN DEFAULT false
-    );
-    """)
-    await conn.execute("""
-    CREATE TABLE IF NOT EXISTS "FeedState" (
-         feed_url TEXT PRIMARY KEY,
-         last_update TIMESTAMPTZ
-    );
-    """)
-    
-    # Check if feeds table is empty to perform initial population
-    if await conn.fetchval("SELECT COUNT(*) FROM feeds") == 0:
-        logging.info("Feeds table is empty. Populating with default data from feeds.json.")
-        try:
-            with open('feeds.json', 'r') as f:
-                feed_data = json.load(f)
-            
-            category_priority = 0
-            for category, feeds_list in feed_data.items():
-                # Insert category if it doesn't exist
-                await conn.execute(
-                    "INSERT INTO categories (name, priority) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
-                    category, category_priority
-                )
-                category_priority += 1
-
-                feed_priority = 0
-                for feed in feeds_list:
-                    await conn.execute(
-                        """
-                        INSERT INTO feeds (name, url, category, "isActive", priority)
-                        VALUES ($1, $2, $3, $4, $5)
-                        ON CONFLICT (url) DO NOTHING;
-                        """,
-                        feed['name'], feed['url'], category, feed.get('isActive', True), feed_priority
-                    )
-                    feed_priority += 1
-            logging.info("Default feeds and categories populated successfully.")
-        except Exception as e:
-            logging.error(f"Could not populate default data from feeds.json: {e}")
-
-    await conn.close()
-
-
-# --- Helper Function to Ensure Datetime is Timezone-Aware ---
-def ensure_aware(dt, tz=IST):
-    """
-    Ensures that the datetime 'dt' is timezone-aware.
-    If 'dt' is naive, it localizes it using the provided timezone (default IST).
-    """
-    if dt is None:
-        return None
-    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-        return tz.localize(dt)
-    return dt
-
-# --- Feed State Functions ---
-async def get_feed_last_update(feed_url: str):
-    """
-    Retrieves the last update timestamp for the given feed.
-    Ensures that the returned datetime is timezone-aware.
-    """
-    conn = await get_db_connection()
-    row = await conn.fetchrow('SELECT last_update FROM "FeedState" WHERE feed_url = $1', feed_url)
-    await conn.close()
-    if row and row['last_update']:
-        return ensure_aware(row['last_update'], IST)
-    else:
-        return None
-
-async def update_feed_last_update(feed_url: str, new_update: datetime):
-    """
-    Updates (or inserts) the last update timestamp for the given feed.
-    """
-    new_update = ensure_aware(new_update, IST)
-    conn = await get_db_connection()
-    await conn.execute(
-        'INSERT INTO "FeedState" (feed_url, last_update) VALUES ($1, $2) ON CONFLICT (feed_url) DO UPDATE SET last_update = EXCLUDED.last_update',
-        feed_url, new_update
-    )
-    await conn.close()
-
-
+# Database functions moved to database.py module
+get_db_connection = database.get_db_connection
+init_db = database.init_db
+ensure_aware = database.ensure_aware
+get_feed_last_update = database.get_feed_last_update
+update_feed_last_update = database.update_feed_last_update
 
 
 # --- HTML Cleaning and Formatting Helper ---
@@ -311,6 +203,19 @@ def sanitize_text(text):
     return normalized.encode('latin1', 'ignore').decode('latin1')
 
 async def send_ntfy_notification(title: str, link: str, description: str, category: str, source: str):
+    # Check if ntfy is enabled for this category
+    try:
+        conn = await get_db_connection()
+        ntfy_enabled = await conn.fetchval("SELECT ntfy_enabled FROM categories WHERE name = $1", category)
+        await conn.close()
+        
+        if ntfy_enabled is False:
+            logging.debug(f"Ntfy notifications disabled for category: {category}")
+            return
+    except Exception as e:
+        logging.warning(f"Could not check ntfy status for category {category}: {e}")
+        # Continue with sending notification if we can't check status
+    
     title = sanitize_text(title)
     topic = f"feeds-{category.lower().replace(' ', '-')}"
     ntfy_url = f"{NTFY_BASE_URL}/{topic}"
@@ -488,13 +393,21 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 logging.exception("Error extracting content for %s", link)
                 article_content = None
 
-            await conn.execute(
+            # Insert article and get its ID
+            article_id = await conn.fetchval(
                 'INSERT INTO articles '
                 '(title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id) '
-                'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
+                'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) '
+                'RETURNING id',
                 title, link, description, thumbnail_url,
                  published_formatted, pub_dt, category, article_content, source_name, feed_id
             )
+
+            # Process with AI filter if enabled for this category (only for NEW articles)
+            try:
+                await ai_filter.process_new_article(article_id, category, conn)
+            except Exception as e:
+                logging.warning(f"AI filter processing failed for article {article_id}: {e}")
 
             await send_ntfy_notification(title, link, description, category, source_name)
 
@@ -531,18 +444,119 @@ async def fetch_all_feeds_db():
         logging.info("Feed update completed at %s", end_time)
 
 
-async def get_articles_for_category_db(category: str, days: int = 2, starred_only: bool = False):
+async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None):
+    """Get total count of articles for pagination"""
+    threshold = datetime.now(IST) - timedelta(days=days)
+    conn = await get_db_connection()
+    
+    try:
+        if search_query:
+            # For search, we need to count search results
+            # This is a simplified count - actual search might be more complex
+            query = """
+                SELECT COUNT(*) as total
+                FROM articles a
+                JOIN feeds f ON a.feed_id = f.id
+                WHERE a.published_datetime >= $1
+                AND f."isActive" = true
+                AND (a.title ILIKE $2 OR a.description ILIKE $2 OR a.content ILIKE $2)
+            """
+            params = [threshold, f"%{search_query}%"]
+            
+            if category:
+                query = query.replace("AND (a.title", "AND a.category = $3 AND (a.title")
+                params.append(category)
+                
+            if starred_only:
+                query += " AND a.starred = true"
+        else:
+            # Standard count
+            query = """
+                SELECT COUNT(*) as total
+                FROM articles a
+                JOIN feeds f ON a.feed_id = f.id
+                WHERE a.published_datetime >= $1
+                AND f."isActive" = true
+            """
+            params = [threshold]
+            
+            if category:
+                query += " AND a.category = $2"
+                params.append(category)
+                
+            if starred_only:
+                query += " AND a.starred = true"
+        
+        result = await conn.fetchrow(query, *params)
+        return result['total'] if result else 0
+    finally:
+        await conn.close()
+
+
+async def get_user_timezone():
+    """Get user's preferred timezone from settings."""
+    conn = await get_db_connection()
+    timezone_str = await conn.fetchval("SELECT value FROM user_settings WHERE key = 'timezone'")
+    await conn.close()
+    return pytz.timezone(timezone_str) if timezone_str else IST
+
+async def convert_article_timezone(article: dict, target_tz):
+    """Convert article's published datetime to target timezone and update published string."""
+    if article.get('published_datetime'):
+        try:
+            # Parse the datetime (should be in UTC from database)
+            pub_dt = datetime.fromisoformat(article['published_datetime'].replace('Z', '+00:00'))
+            
+            # Convert to target timezone
+            pub_dt_converted = pub_dt.astimezone(target_tz)
+            
+            # Update the published_datetime ISO string
+            article['published_datetime'] = pub_dt_converted.isoformat()
+            
+            # Update the human-readable published string
+            now = datetime.now(target_tz)
+            yesterday = now - timedelta(days=1)
+            tz_abbr = pub_dt_converted.strftime("%Z")
+            
+            if pub_dt_converted.date() == now.date():
+                article['published'] = pub_dt_converted.strftime("Today at %I:%M %p") + f" ({tz_abbr})"
+            elif pub_dt_converted.date() == yesterday.date():
+                article['published'] = pub_dt_converted.strftime("Yesterday at %I:%M %p") + f" ({tz_abbr})"
+            else:
+                article['published'] = pub_dt_converted.strftime("%b %d, %Y - %I:%M %p") + f" ({tz_abbr})"
+        except Exception as e:
+            logging.warning(f"Error converting timezone for article: {e}")
+    
+    return article
+
+async def get_articles_for_category_db(category: str, days: int = 2, starred_only: bool = False, limit: int = None, offset: int = None, target_tz=None, view: str = "standard"):
      threshold = datetime.now(IST) - timedelta(days=days)
      conn = await get_db_connection()
      
-     query = """
-         SELECT a.title, a.link, a.description, a.thumbnail, a.published, a.published_datetime, a.category, a.content, a.source, a.starred 
-         FROM articles a
-         JOIN feeds f ON a.feed_id = f.id
-         WHERE a.category = $1 
-         AND a.published_datetime >= $2
-         AND f."isActive" = true
-     """
+     # Base query depends on view type
+     if view == "ai":
+         # AI view: only show articles that passed AI filter
+         query = """
+             SELECT a.title, a.link, a.description, a.thumbnail, a.published, a.published_datetime, a.category, a.content, a.source, a.starred 
+             FROM articles a
+             JOIN feeds f ON a.feed_id = f.id
+             JOIN article_ai_matches aam ON a.id = aam.article_id
+             JOIN categories c ON c.name = a.category
+             WHERE a.category = $1 
+             AND a.published_datetime >= $2
+             AND f."isActive" = true
+             AND aam.category_id = c.id
+         """
+     else:
+         # Standard view: show all articles
+         query = """
+             SELECT a.title, a.link, a.description, a.thumbnail, a.published, a.published_datetime, a.category, a.content, a.source, a.starred 
+             FROM articles a
+             JOIN feeds f ON a.feed_id = f.id
+             WHERE a.category = $1 
+             AND a.published_datetime >= $2
+             AND f."isActive" = true
+         """
      
      params = [category, threshold]
      
@@ -551,6 +565,15 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
      
      query += " ORDER BY a.published_datetime DESC"
      
+     # Add pagination if limit is provided
+     if limit is not None:
+         query += f" LIMIT ${len(params) + 1}"
+         params.append(limit)
+         
+         if offset is not None:
+             query += f" OFFSET ${len(params) + 1}"
+             params.append(offset)
+     
      rows = await conn.fetch(query, *params)
      
      articles = []
@@ -558,7 +581,7 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
          pub_dt = row['published_datetime']
          pub_dt_str = pub_dt.isoformat() if pub_dt else None
          
-         articles.append({
+         article = {
              "title": row['title'],
              "link": row['link'],
              "description": row['description'],
@@ -569,11 +592,88 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
              "content": row['content'],
              "source": row['source'] or "Unknown",
              "starred": row['starred']
-         })
+         }
+         
+         # Convert timezone if target_tz is provided
+         if target_tz:
+             article = await convert_article_timezone(article, target_tz)
+         
+         articles.append(article)
      await conn.close()
      return articles
 
 
+async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, limit: int = 100, offset: int = 0, category: str = None, target_tz=None, view: str = "standard"):
+    """Get articles across all categories with pagination"""
+    threshold = datetime.now(IST) - timedelta(days=days)
+    conn = await get_db_connection()
+    
+    try:
+        # Base query depends on view type
+        if view == "ai" and category:
+            # AI view: only show articles that passed AI filter
+            query = """
+                SELECT a.title, a.link, a.description, a.thumbnail, a.published, a.published_datetime, a.category, a.content, a.source, a.starred 
+                FROM articles a
+                JOIN feeds f ON a.feed_id = f.id
+                JOIN article_ai_matches aam ON a.id = aam.article_id
+                JOIN categories c ON c.name = a.category
+                WHERE a.published_datetime >= $1
+                AND f."isActive" = true
+                AND aam.category_id = c.id
+            """
+        else:
+            # Standard view: show all articles
+            query = """
+                SELECT a.title, a.link, a.description, a.thumbnail, a.published, a.published_datetime, a.category, a.content, a.source, a.starred 
+                FROM articles a
+                JOIN feeds f ON a.feed_id = f.id
+                WHERE a.published_datetime >= $1
+                AND f."isActive" = true
+            """
+        
+        params = [threshold]
+        
+        if category:
+            query += " AND a.category = $2"
+            params.append(category)
+        
+        if starred_only:
+            query += f" AND a.starred = true"
+        
+        query += " ORDER BY a.published_datetime DESC"
+        query += f" LIMIT ${len(params) + 1} OFFSET ${len(params) + 2}"
+        params.extend([limit, offset])
+        
+        rows = await conn.fetch(query, *params)
+        
+        articles = []
+        for row in rows:
+            pub_dt = row['published_datetime']
+            pub_dt_str = pub_dt.isoformat() if pub_dt else None
+            
+            article = {
+                "title": row['title'],
+                "link": row['link'],
+                "description": row['description'],
+                "thumbnail": row['thumbnail'],
+                "published": row['published'],
+                "published_datetime": pub_dt_str,
+                "category": row['category'],
+                "content": row['content'],
+                "source": row['source'] or "Unknown",
+                "starred": row['starred']
+            }
+            
+            # Convert timezone if target_tz is provided
+            if target_tz:
+                article = await convert_article_timezone(article, target_tz)
+            
+            articles.append(article)
+        
+        return articles
+    finally:
+        await conn.close()
 
 
 async def cleanup_old_articles():
@@ -606,7 +706,7 @@ async def cleanup_old_articles():
         logging.info("Finished scheduled cleanup of old articles.")
 
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone=IST)
 
 # Global Redis client for search index
 redis_client = None
@@ -851,8 +951,8 @@ async def get_feeds_config():
         
     feeds_config = {}
     for category_name in ordered_categories:
-        if category_name in feeds_by_category:
-            feeds_config[category_name] = feeds_by_category[category_name]
+        # Include all categories, even if they have no feeds
+        feeds_config[category_name] = feeds_by_category.get(category_name, [])
 
     await conn.close()
     return JSONResponse(content=feeds_config)
@@ -895,18 +995,67 @@ async def feeds(
     days: int = Query(2, description="Number of days back to fetch articles for.", ge=1, le=30),
     q: str = Query(None, description="Search query for articles"),
     category: str = Query(None, description="Category filter for search"),
-    starred_only: bool = Query(False, description="Filter to show only starred articles")
+    starred_only: bool = Query(False, description="Filter to show only starred articles"),
+    limit: int = Query(None, description="Number of articles to return (for pagination)", ge=1, le=500),
+    offset: int = Query(None, description="Number of articles to skip (for pagination)", ge=0),
+    view: str = Query("standard", description="View type: 'standard' or 'ai' for AI-filtered articles")
 ):
     """
-    Get feeds with optional search and starred filter functionality.
+    Get feeds with optional search, starred filter, AI filtering, and pagination functionality.
     
     - If `q` is provided, performs a search (global or category-specific)
     - If `q` and `category` are provided, searches within that category only
     - If `starred_only` is true, filters to show only starred articles
-    - If neither is provided, returns standard feed view
+    - If `view` is 'ai', shows only AI-filtered articles (requires category with AI enabled)
+    - If `limit` and `offset` are provided, returns paginated results with metadata
+    - If neither is provided, returns standard feed view grouped by category
     """
     
-    # Handle search queries
+    # Get user's timezone preference
+    user_tz = await get_user_timezone()
+    
+    # Paginated mode - returns flat list with metadata
+    if limit is not None:
+        offset = offset or 0
+        
+        # Get paginated articles
+        articles = await get_all_articles_paginated(
+            days=days,
+            starred_only=starred_only,
+            limit=limit,
+            offset=offset,
+            category=category,
+            target_tz=user_tz,
+            view=view
+        )
+        
+        # Apply search filter if provided
+        if q:
+            search_results = await search_articles(q, category=category)
+            if starred_only:
+                search_results = [article for article in search_results if article.get('starred', False)]
+            
+            # Paginate search results
+            articles = search_results[offset:offset + limit]
+            total_count = len(search_results)
+        else:
+            # Get total count
+            total_count = await get_total_articles_count(
+                category=category,
+                days=days,
+                starred_only=starred_only,
+                search_query=q
+            )
+        
+        return JSONResponse(content={
+            "articles": articles,
+            "total": total_count,
+            "limit": limit,
+            "offset": offset,
+            "has_more": (offset + len(articles)) < total_count
+        })
+    
+    # Handle search queries (non-paginated)
     if q:
         search_results = await search_articles(q, category=category)
         
@@ -936,7 +1085,7 @@ async def feeds(
             
             return JSONResponse(content=categories_list)
     
-    # Standard feed view (no search)
+    # Standard feed view (no search, no pagination) - grouped by category
     conn = await get_db_connection()
     
     try:
@@ -945,7 +1094,7 @@ async def feeds(
             
         categories_list = []
         for cat in ordered_categories:
-            articles = await get_articles_for_category_db(cat, days=days, starred_only=starred_only)
+            articles = await get_articles_for_category_db(cat, days=days, starred_only=starred_only, target_tz=user_tz, view=view)
             if articles:
                 categories_list.append({"category": cat, "feed_items": articles})
                 
@@ -992,6 +1141,80 @@ async def star_article(request: Request):
     
     except Exception as e:
         logging.exception("Error updating starred status: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.post("/api/articles/statuses")
+async def get_articles_statuses(request: Request):
+    """Fetch read status for a list of article links."""
+    try:
+        body = await request.json()
+        links = body.get("links", [])
+        
+        if not links:
+            return JSONResponse({})
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Fetch read statuses for the provided links
+            rows = await conn.fetch(
+                'SELECT article_link, is_read FROM user_article_status WHERE article_link = ANY($1)',
+                links
+            )
+            
+            # Build a dictionary of link -> is_read
+            statuses = {row['article_link']: row['is_read'] for row in rows}
+            
+            return JSONResponse(statuses)
+        
+        except asyncpg.PostgresError as e:
+            logging.exception("Database error fetching article statuses: %s", str(e))
+            return JSONResponse({"error": "Database error"}, status_code=500)
+        finally:
+            await conn.close()
+    
+    except Exception as e:
+        logging.exception("Error fetching article statuses: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.post("/api/articles/mark-as-read")
+async def mark_articles_as_read(request: Request):
+    """Mark one or more articles as read."""
+    try:
+        body = await request.json()
+        links = body.get("links", [])
+        
+        if not links:
+            return JSONResponse({"message": "No links provided"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Insert or update read status for each link
+            for link in links:
+                await conn.execute(
+                    '''
+                    INSERT INTO user_article_status (article_link, is_read, read_at)
+                    VALUES ($1, true, CURRENT_TIMESTAMP)
+                    ON CONFLICT (article_link) 
+                    DO UPDATE SET is_read = true, read_at = CURRENT_TIMESTAMP
+                    ''',
+                    link
+                )
+            
+            return JSONResponse({
+                "message": f"Marked {len(links)} article(s) as read",
+                "count": len(links)
+            })
+        
+        except asyncpg.PostgresError as e:
+            logging.exception("Database error marking articles as read: %s", str(e))
+            return JSONResponse({"error": "Database error"}, status_code=500)
+        finally:
+            await conn.close()
+    
+    except Exception as e:
+        logging.exception("Error marking articles as read: %s", str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/add-feed")
@@ -1123,12 +1346,49 @@ async def delete_feed(feed_id: int):
         logging.error(f"Error deleting feed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/settings")
+async def get_settings():
+    """Get all user settings."""
+    conn = await get_db_connection()
+    rows = await conn.fetch("SELECT key, value FROM user_settings")
+    settings = {row['key']: row['value'] for row in rows}
+    await conn.close()
+    return JSONResponse(content=settings)
+
+@app.put("/api/settings")
+async def update_settings(request: Request):
+    """Update user settings."""
+    try:
+        body = await request.json()
+        
+        conn = await get_db_connection()
+        
+        for key, value in body.items():
+            await conn.execute(
+                "INSERT INTO user_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2",
+                key, value
+            )
+        
+        await conn.close()
+        return JSONResponse({"message": "Settings updated successfully"})
+    except Exception as e:
+        logging.error(f"Error updating settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/categories")
 async def get_categories():
     """Get all categories, ordered by priority."""
     conn = await get_db_connection()
-    rows = await conn.fetch("SELECT id, name, priority, is_default FROM categories ORDER BY priority")
-    categories = [{"id": row['id'], "name": row['name'], "priority": row['priority'], "is_default": row['is_default']} for row in rows]
+    rows = await conn.fetch("SELECT id, name, priority, is_default, ntfy_enabled, ai_prompt, ai_enabled FROM categories ORDER BY priority")
+    categories = [{
+        "id": row['id'], 
+        "name": row['name'], 
+        "priority": row['priority'], 
+        "is_default": row['is_default'], 
+        "ntfy_enabled": row['ntfy_enabled'],
+        "ai_prompt": row['ai_prompt'],
+        "ai_enabled": row['ai_enabled']
+    } for row in rows]
     await conn.close()
     return JSONResponse(content=categories)
 
@@ -1159,6 +1419,22 @@ async def set_default_category(category_id: int):
         logging.error(f"Error setting default category: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.put("/api/category/{category_id}/ntfy")
+async def toggle_category_ntfy(category_id: int, request: Request):
+    """Toggle ntfy notifications for a category."""
+    try:
+        body = await request.json()
+        ntfy_enabled = body.get("ntfy_enabled", True)
+        
+        conn = await get_db_connection()
+        await conn.execute("UPDATE categories SET ntfy_enabled = $1 WHERE id = $2", ntfy_enabled, category_id)
+        await conn.close()
+        
+        return JSONResponse({"message": f"Ntfy notifications {'enabled' if ntfy_enabled else 'disabled'} for category."})
+    except Exception as e:
+        logging.error(f"Error toggling category ntfy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.delete("/api/category/{category_id}")
 async def delete_category(category_id: int):
     """Delete a category and all its feeds."""
@@ -1176,6 +1452,107 @@ async def delete_category(category_id: int):
         return JSONResponse({"message": f"Category '{category_name}' and its feeds have been deleted."})
     except Exception as e:
         logging.error(f"Error deleting category: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/category/{category_id}/ai-settings")
+async def get_category_ai_settings(category_id: int):
+    """Get AI filter settings for a category."""
+    try:
+        conn = await get_db_connection()
+        category = await conn.fetchrow(
+            "SELECT ai_prompt, ai_enabled FROM categories WHERE id = $1",
+            category_id
+        )
+        await conn.close()
+        
+        if not category:
+            raise HTTPException(status_code=404, detail="Category not found")
+        
+        return JSONResponse(content={
+            "ai_prompt": category['ai_prompt'],
+            "ai_enabled": category['ai_enabled']
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error getting AI settings for category {category_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/category/{category_id}/ai-settings")
+async def update_category_ai_settings(category_id: int, request: Request):
+    """Update AI filter settings for a category."""
+    try:
+        body = await request.json()
+        ai_prompt = body.get("ai_prompt")
+        ai_enabled = body.get("ai_enabled", False)
+        
+        conn = await get_db_connection()
+        
+        # Get old prompt to check if it changed
+        old_category = await conn.fetchrow(
+            "SELECT ai_prompt, ai_enabled FROM categories WHERE id = $1",
+            category_id
+        )
+        
+        if not old_category:
+            await conn.close()
+            raise HTTPException(status_code=404, detail="Category not found")
+        
+        # Update settings
+        await conn.execute(
+            "UPDATE categories SET ai_prompt = $1, ai_enabled = $2 WHERE id = $3",
+            ai_prompt, ai_enabled, category_id
+        )
+        
+        await conn.close()
+        
+        # Note: We don't automatically reprocess old articles to save costs
+        # Users must manually click "Reprocess Articles" if they want to filter existing articles
+        return JSONResponse(content={
+            "success": True,
+            "message": "AI filter settings updated. New articles will be filtered automatically."
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error updating AI settings for category {category_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/category/{category_id}/reprocess-ai-filter")
+async def reprocess_category_ai_filter(category_id: int):
+    """Manually trigger reprocessing of all articles for a category's AI filter."""
+    try:
+        conn = await get_db_connection()
+        
+        # Check if category exists
+        category = await conn.fetchrow(
+            "SELECT id, ai_enabled FROM categories WHERE id = $1",
+            category_id
+        )
+        
+        if not category:
+            await conn.close()
+            raise HTTPException(status_code=404, detail="Category not found")
+        
+        if not category['ai_enabled']:
+            await conn.close()
+            raise HTTPException(status_code=400, detail="AI filtering not enabled for this category")
+        
+        # Reprocess articles
+        stats = await ai_filter.reprocess_category_articles(category_id, conn)
+        
+        await conn.close()
+        
+        return JSONResponse(content={
+            "success": True,
+            "stats": stats
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error reprocessing category {category_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/feeds/column", response_class=HTMLResponse)
