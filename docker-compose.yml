@@ -1,4 +1,18 @@
 services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8324:8324"
+    environment:
+      - NODE_ENV=production
+    restart: unless-stopped
+    networks:
+      - db-net
+    depends_on:
+      - fastapi
+
   fastapi:
     build: .
     ports:
@@ -14,12 +28,12 @@ services:
     # and the FastAPI server will automatically restart.
     # Run with `docker-compose up --build --watch`.
     # For production, comment out the 'command' and 'develop' sections.
-    command: ["fastapi", "dev", "main.py", "--host", "0.0.0.0", "--port", "8321"]
-    develop:
-      watch:
-        - action: sync
-          path: .
-          target: /app
+    # command: ["fastapi", "dev", "main.py", "--host", "0.0.0.0", "--port", "8321"]
+    # develop:
+    #   watch:
+    #     - action: sync
+    #       path: .
+    #       target: /app
           # This 'watch' block replaces the need for a 'volumes' bind mount in development.
 
     restart: unless-stopped

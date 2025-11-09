@@ -34,3 +34,10 @@ class Config:
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:2112")  # default for local
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+    
+    # OpenAI-Compatible API Settings for AI Content Filtering
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")  # Default to OpenAI
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "100"))
+    OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))

@@ -1,7 +1,7 @@
 <script lang="ts">
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
-import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText } from '@lucide/svelte';
+import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
 import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import Button from '$lib/components/ui/button/index.svelte';
@@ -50,6 +50,7 @@ let isStarredViewActive = $state<boolean>(false);
 let isGeneratingReport = $state<boolean>(false);
 let hideReadArticles = $state<boolean>(false);
 let readStatuses = $state<Record<string, boolean>>({});
+let viewType = $state<'standard' | 'ai'>('standard');
 
 // Pagination state
 let allArticles = $state<FeedItem[]>([]);
@@ -175,8 +176,13 @@ async function toggleStarredView() {
 	await loadInitialArticles();
 }
 
-function toggleHideReadArticles() {
+async function toggleHideReadArticles() {
 	hideReadArticles = !hideReadArticles;
+}
+
+async function toggleViewType() {
+	viewType = viewType === 'standard' ? 'ai' : 'standard';
+	await loadInitialArticles();
 }
 
 async function loadInitialArticles() {
@@ -188,9 +194,10 @@ async function loadInitialArticles() {
 	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
 	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
 	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	const viewParam = `&view=${viewType}`;
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2&limit=${INITIAL_LOAD}&offset=0${categoryParam}${searchParam}${starredParam}`);
+		const response = await fetch(`/api/feeds?days=2&limit=${INITIAL_LOAD}&offset=0${categoryParam}${searchParam}${starredParam}${viewParam}`);
 		if (!response.ok) throw new Error('Failed to fetch feeds');
 		
 		const data = await response.json();
@@ -221,9 +228,10 @@ async function loadMoreArticles() {
 	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
 	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
 	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	const viewParam = `&view=${viewType}`;
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2&limit=${LOAD_MORE_SIZE}&offset=${currentOffset}${categoryParam}${searchParam}${starredParam}`);
+		const response = await fetch(`/api/feeds?days=2&limit=${LOAD_MORE_SIZE}&offset=${currentOffset}${categoryParam}${searchParam}${starredParam}${viewParam}`);
 		if (!response.ok) throw new Error('Failed to fetch more articles');
 		
 		const data = await response.json();
@@ -247,9 +255,10 @@ async function fetchFeedsData() {
 	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
 	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
 	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
+	const viewParam = `&view=${viewType}`;
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2${categoryParam}${searchParam}${starredParam}`);
+		const response = await fetch(`/api/feeds?days=2${categoryParam}${searchParam}${starredParam}${viewParam}`);
 		if (!response.ok) throw new Error('Failed to fetch feeds');
 		
 		const results = await response.json();
@@ -561,6 +570,18 @@ $effect(() => {
 				{:else}
 					<Circle class="size-4" />
 				{/if}
+			</Button>
+
+			<!-- AI View Toggle -->
+			<Button
+				variant={viewType === 'ai' ? 'default' : 'outline'}
+				size="icon"
+				onclick={toggleViewType}
+				aria-label={viewType === 'ai' ? 'Switch to standard view' : 'Switch to AI filtered view'}
+				title={viewType === 'ai' ? 'AI Filtered View' : 'Standard View'}
+				class={viewType === 'ai' ? 'bg-purple-500 hover:bg-purple-600' : ''}
+			>
+				<Sparkles class="size-4" />
 			</Button>
 
 			<!-- View Mode Toggle -->
