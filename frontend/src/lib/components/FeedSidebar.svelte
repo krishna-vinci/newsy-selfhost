@@ -30,6 +30,8 @@ type Category = {
 	priority: number;
 	is_default: boolean;
 	ntfy_enabled: boolean;
+	ai_prompt: string | null;
+	ai_enabled: boolean;
 };
 
 type FeedConfig = Record<string, Feed[]>;
@@ -362,6 +364,73 @@ async function toggleCategoryNtfy(category: Category) {
 	} catch (error) {
 		category.ntfy_enabled = previousEnabled;
 		toast.error('Failed to update ntfy setting');
+	}
+}
+
+// AI Filter Functions
+async function toggleCategoryAI(category: Category) {
+	const previousEnabled = category.ai_enabled;
+	category.ai_enabled = !category.ai_enabled;
+	
+	try {
+		const response = await fetch(`/api/category/${category.id}/ai-settings`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				ai_prompt: category.ai_prompt,
+				ai_enabled: category.ai_enabled
+			})
+		});
+		
+		if (!response.ok) throw new Error('Failed to update AI filter setting');
+		
+		if (category.ai_enabled) {
+			toast.success('AI filter enabled. New articles will be filtered automatically.');
+		} else {
+			toast.success('AI filter disabled.');
+		}
+	} catch (error) {
+		category.ai_enabled = previousEnabled;
+		toast.error('Failed to update AI filter setting');
+	}
+}
+
+async function saveAIPrompt(category: Category, prompt: string) {
+	const previousPrompt = category.ai_prompt;
+	category.ai_prompt = prompt;
+	
+	try {
+		const response = await fetch(`/api/category/${category.id}/ai-settings`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				ai_prompt: prompt,
+				ai_enabled: category.ai_enabled
+			})
+		});
+		
+		if (!response.ok) throw new Error('Failed to save AI prompt');
+		
+		toast.success('AI prompt saved. New articles will be filtered automatically.');
+	} catch (error) {
+		category.ai_prompt = previousPrompt;
+		toast.error('Failed to save AI prompt');
+	}
+}
+
+async function reprocessCategory(categoryId: number) {
+	try {
+		toast.info('Starting reprocessing...');
+		const response = await fetch(`/api/category/${categoryId}/reprocess-ai-filter`, {
+			method: 'POST'
+		});
+		
+		if (!response.ok) throw new Error('Failed to reprocess category');
+		
+		const result = await response.json();
+		toast.success(`Reprocessing complete! ${result.stats.matched} of ${result.stats.total} articles matched`);
+	} catch (error) {
+		toast.error('Failed to reprocess category');
 	}
 }
 
@@ -806,8 +875,9 @@ onMount(async () => {
 			<h3 class="mb-4 text-lg font-semibold">Settings</h3>
 
 			<Tabs.Root bind:value={activeTab} class="w-full">
-				<Tabs.List class="grid w-full grid-cols-3">
+				<Tabs.List class="grid w-full grid-cols-4">
 					<Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
+					<Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
 					<Tabs.Trigger value="timezone">Timezone</Tabs.Trigger>
 					<Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
 				</Tabs.List>
@@ -871,6 +941,102 @@ onMount(async () => {
 								</div>
 							</div>
 						{/each}
+					</div>
+				</Tabs.Content>
+
+				<!-- AI Filters Tab -->
+				<Tabs.Content value="ai-filters" class="mt-4 min-h-[400px]">
+					<div class="space-y-4 p-4">
+						<div class="mb-4">
+							<h4 class="text-sm font-semibold mb-2">AI-Powered Content Filtering</h4>
+							<p class="text-sm text-muted-foreground">
+								Use AI to filter articles based on your interests. When enabled, <strong>only new incoming articles</strong> will be filtered automatically. Use "Reprocess Articles" to filter existing articles.
+							</p>
+						</div>
+
+						<div class="space-y-4 max-h-[60vh] overflow-y-auto">
+							{#each categoriesList as category (category.id)}
+								<div class="rounded-lg border border-border bg-background p-4 space-y-3">
+									<!-- Header with Category Name and Toggle -->
+									<div class="flex items-center justify-between">
+										<div class="flex items-center gap-3">
+											<h5 class="font-medium">{category.name}</h5>
+											{#if category.ai_enabled}
+												<span class="text-xs bg-green-500/10 text-green-500 px-2 py-1 rounded">Active</span>
+											{:else}
+												<span class="text-xs bg-muted text-muted-foreground px-2 py-1 rounded">Inactive</span>
+											{/if}
+										</div>
+										<Switch.Switch
+											checked={category.ai_enabled}
+											onCheckedChange={() => toggleCategoryAI(category)}
+										/>
+									</div>
+
+									<!-- Prompt Input -->
+									{#if category.ai_enabled || category.ai_prompt}
+										<div class="space-y-2">
+											<label class="text-xs font-medium text-muted-foreground">Filter Prompt</label>
+											<textarea
+												bind:value={category.ai_prompt}
+												placeholder="e.g., I'm interested in articles about artificial intelligence, machine learning, and software development..."
+												class="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none"
+												onblur={() => {
+													if (category.ai_prompt !== null && category.ai_prompt.trim() !== '') {
+														saveAIPrompt(category, category.ai_prompt);
+													}
+												}}
+											></textarea>
+											<p class="text-xs text-muted-foreground">
+												Describe what types of articles you want to see. Be specific for better results.
+											</p>
+										</div>
+
+										<!-- Action Buttons -->
+										<div class="flex gap-2">
+											<Button
+												size="sm"
+												variant="outline"
+												onclick={() => {
+													if (category.ai_prompt) {
+														saveAIPrompt(category, category.ai_prompt);
+													}
+												}}
+												disabled={!category.ai_prompt || category.ai_prompt.trim() === ''}
+											>
+												Save Prompt
+											</Button>
+											<Button
+												size="sm"
+												variant="secondary"
+												onclick={() => reprocessCategory(category.id)}
+												disabled={!category.ai_enabled || !category.ai_prompt}
+												title="Filter existing articles with current prompt"
+											>
+												Reprocess Existing Articles
+											</Button>
+										</div>
+									{/if}
+
+									{#if !category.ai_enabled && !category.ai_prompt}
+										<p class="text-xs text-muted-foreground italic">
+											Enable AI filtering to define a custom prompt for this category.
+										</p>
+									{/if}
+								</div>
+							{/each}
+						</div>
+
+						<!-- Info Box -->
+						<div class="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-2">
+							<p><strong>How it works:</strong></p>
+							<ul class="list-disc list-inside space-y-1 ml-2">
+								<li><strong>New articles:</strong> Automatically filtered when they arrive (if AI enabled)</li>
+								<li><strong>Existing articles:</strong> Click "Reprocess" to filter them (costs API calls)</li>
+								<li>Be specific about topics you're interested in for better results</li>
+								<li>Keep prompts under 500 characters</li>
+							</ul>
+						</div>
 					</div>
 				</Tabs.Content>
 

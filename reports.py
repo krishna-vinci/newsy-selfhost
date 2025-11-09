@@ -19,6 +19,7 @@ import html2text
 import markdown2
 
 from config import Config
+from database import get_db_connection
 
 # Indian Standard Time
 IST = pytz.timezone("Asia/Kolkata")
@@ -59,56 +60,15 @@ class ReportFile(BaseModel):
 
 # --- Database Functions ---
 
-async def get_db_connection():
-    """Get database connection"""
-    return await asyncpg.connect(
-        database=Config.DB_NAME,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD,
-        host=Config.DB_HOST,
-        port=Config.DB_PORT
-    )
-
-
 async def init_reports_db():
-    """Initialize report_schedules table"""
-    conn = await get_db_connection()
-    try:
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS report_schedules (
-                id SERIAL PRIMARY KEY,
-                category TEXT NOT NULL,
-                schedule_type TEXT NOT NULL CHECK (schedule_type IN ('daily', 'weekly')),
-                schedule_hour INTEGER DEFAULT 0 CHECK (schedule_hour >= 0 AND schedule_hour < 24),
-                schedule_minute INTEGER DEFAULT 0 CHECK (schedule_minute >= 0 AND schedule_minute < 60),
-                enabled BOOLEAN DEFAULT true,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                updated_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(category, schedule_type)
-            );
-        """)
-        logging.info("Report schedules table initialized")
-        
-        # Add columns if they don't exist (for existing databases)
-        try:
-            await conn.execute("""
-                ALTER TABLE report_schedules
-                ADD COLUMN IF NOT EXISTS schedule_hour INTEGER DEFAULT 0 CHECK (schedule_hour >= 0 AND schedule_hour < 24);
-            """)
-            await conn.execute("""
-                ALTER TABLE report_schedules
-                ADD COLUMN IF NOT EXISTS schedule_minute INTEGER DEFAULT 0 CHECK (schedule_minute >= 0 AND schedule_minute < 60);
-            """)
-            logging.info("Added schedule_hour and schedule_minute columns to report_schedules table")
-        except Exception as e:
-            # Columns might already exist
-            logging.debug(f"Columns may already exist: {e}")
-    
-    except Exception as e:
-        logging.error(f"Error initializing report_schedules table: {e}")
-        raise
-    finally:
-        await conn.close()
+    """
+    Initialize reports database.
+    Note: report_schedules table is now created in database.py with all columns.
+    This function is kept for backward compatibility.
+    """
+    # Table creation is now handled in database.init_db()
+    logging.info("Reports database initialization - table created in main database.init_db()")
+    pass
 
 
 # --- Core Report Generation Function ---
