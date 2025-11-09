@@ -374,20 +374,46 @@ function handleKeydown(event: KeyboardEvent) {
 		
 		if (event.key === 'ArrowDown') {
 			event.preventDefault();
-			// Mark previous article as read
+			// Mark current article as read
 			if (filteredArticles[selectedColumnIndex]) {
 				markAsRead([filteredArticles[selectedColumnIndex].link]);
 			}
-			selectedColumnIndex = Math.min(selectedColumnIndex + 1, filteredArticles.length - 1);
-			loadArticleContent(filteredArticles[selectedColumnIndex].link);
+			
+			// When hideReadArticles is enabled, marking the current article as read removes it
+			// So the next article is now at the current index, not index + 1
+			if (hideReadArticles) {
+				// Stay at the same index (which now points to the next article)
+				// But ensure we don't go past the end
+				selectedColumnIndex = Math.min(selectedColumnIndex, filteredArticles.length - 2);
+			} else {
+				// Normal navigation: move to next article
+				selectedColumnIndex = Math.min(selectedColumnIndex + 1, filteredArticles.length - 1);
+			}
+			
+			// Load the article at the new index (wait a bit for state to update)
+			setTimeout(() => {
+				if (filteredArticles[selectedColumnIndex]) {
+					loadArticleContent(filteredArticles[selectedColumnIndex].link);
+				}
+			}, 50);
 		} else if (event.key === 'ArrowUp') {
 			event.preventDefault();
-			// Mark previous article as read
+			// Mark current article as read
 			if (filteredArticles[selectedColumnIndex]) {
 				markAsRead([filteredArticles[selectedColumnIndex].link]);
 			}
+			
+			// Move to previous article
+			// When hideReadArticles is enabled, we need to move back 1 position
+			// because the current article will be removed
 			selectedColumnIndex = Math.max(selectedColumnIndex - 1, 0);
-			loadArticleContent(filteredArticles[selectedColumnIndex].link);
+			
+			// Load the article at the new index
+			setTimeout(() => {
+				if (filteredArticles[selectedColumnIndex]) {
+					loadArticleContent(filteredArticles[selectedColumnIndex].link);
+				}
+			}, 50);
 		}
 	}
 
@@ -421,11 +447,33 @@ async function generateStarredReport() {
 	}
 }
 
-// Initialize column view
+// Track previous view mode to detect when switching to column view
+let previousViewMode = $state<ViewMode>('card');
+
+// Initialize column view only when first entering it
 $effect(() => {
-	if (viewMode === 'column' && filteredArticles.length > 0) {
+	if (viewMode === 'column' && previousViewMode !== 'column' && filteredArticles.length > 0) {
+		// First time entering column view
 		selectedColumnIndex = 0;
 		loadArticleContent(filteredArticles[0].link);
+	}
+	previousViewMode = viewMode;
+});
+
+// Handle index adjustment when articles change in column view
+$effect(() => {
+	if (viewMode === 'column' && filteredArticles.length > 0) {
+		// Validate current index is still in bounds
+		if (selectedColumnIndex >= filteredArticles.length) {
+			// Index out of bounds, adjust to last article
+			selectedColumnIndex = Math.max(0, filteredArticles.length - 1);
+			loadArticleContent(filteredArticles[selectedColumnIndex].link);
+		} else if (selectedColumnIndex < 0) {
+			// Reset to first article if index is negative
+			selectedColumnIndex = 0;
+			loadArticleContent(filteredArticles[0].link);
+		}
+		// Otherwise, keep the current index (article may have changed but index stays same)
 	}
 });
 
@@ -794,9 +842,19 @@ $effect(() => {
 						onclick={() => {
 							// Mark previous article as read when switching
 							if (selectedColumnIndex !== index && filteredArticles[selectedColumnIndex]) {
-								markAsRead([filteredArticles[selectedColumnIndex].link]);
+								const previousArticleLink = filteredArticles[selectedColumnIndex].link;
+								markAsRead([previousArticleLink]);
+								
+								// If hideReadArticles is enabled and we marked an article before this one,
+								// the index will shift down by 1
+								if (hideReadArticles && selectedColumnIndex < index) {
+									selectedColumnIndex = index - 1;
+								} else {
+									selectedColumnIndex = index;
+								}
+							} else {
+								selectedColumnIndex = index;
 							}
-							selectedColumnIndex = index;
 							loadArticleContent(article.link);
 						}}
 					>
