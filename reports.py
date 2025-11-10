@@ -19,7 +19,7 @@ import html2text
 import markdown2
 
 from config import Config
-from database import get_db_connection
+from database import get_db_connection, release_db_connection
 
 # Indian Standard Time
 IST = pytz.timezone("Asia/Kolkata")
@@ -211,7 +211,7 @@ async def generate_markdown_report(
         }
     
     finally:
-        await conn.close()
+        await release_db_connection(conn)
 
 
 def _generate_markdown_content(
@@ -364,7 +364,7 @@ async def load_and_schedule_reports(scheduler):
         logging.info(f"Loaded {len(schedules)} report schedules")
     
     finally:
-        await conn.close()
+        await release_db_connection(conn)
 
 
 # --- API Endpoints ---
@@ -415,7 +415,7 @@ async def get_schedules():
             for s in schedules
         ])
     finally:
-        await conn.close()
+        await release_db_connection(conn)
 
 
 @router.post("/schedules")
@@ -471,7 +471,7 @@ async def create_schedule(schedule: ReportSchedule):
         logging.error(f"Error creating schedule: {e}")
         raise HTTPException(status_code=500, detail="Failed to create schedule")
     finally:
-        await conn.close()
+        await release_db_connection(conn)
 
 
 @router.put("/schedules/{schedule_id}")
@@ -512,7 +512,7 @@ async def update_schedule(schedule_id: int, schedule: ReportSchedule):
         logging.error(f"Error updating schedule: {e}")
         raise HTTPException(status_code=500, detail="Failed to update schedule")
     finally:
-        await conn.close()
+        await release_db_connection(conn)
 
 
 @router.delete("/schedules/{schedule_id}")
@@ -540,7 +540,7 @@ async def delete_schedule(schedule_id: int):
         logging.error(f"Error deleting schedule: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete schedule")
     finally:
-        await conn.close()
+        await release_db_connection(conn)
 
 
 @router.get("/files")

@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from config import Config
+import database
 
 # Backups directory
 BACKUPS_DIR = Path("data/backups")
@@ -47,14 +48,8 @@ class FeedReorderRequest(BaseModel):
 # --- Database Functions ---
 
 async def get_db_connection():
-    """Get database connection"""
-    return await asyncpg.connect(
-        database=Config.DB_NAME,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD,
-        host=Config.DB_HOST,
-        port=Config.DB_PORT
-    )
+    """Get database connection from pool"""
+    return await database.get_db_connection()
 
 # --- Backup Functions ---
 
@@ -263,7 +258,7 @@ async def export_articles(format: str = Query("csv", regex="^(csv|json)$")):
             LEFT JOIN user_article_status uas ON a.link = uas.article_link
             ORDER BY a.published_datetime DESC
         """)
-        await conn.close()
+        await database.release_db_connection(conn)
         
         articles = [dict(row) for row in rows]
         
@@ -303,7 +298,7 @@ async def export_opml():
             FROM feeds f
             ORDER BY f.category, f.display_order, f.name
         """)
-        await conn.close()
+        await database.release_db_connection(conn)
         
         # Create OPML XML structure
         opml = ET.Element("opml", version="2.0")
@@ -456,7 +451,7 @@ async def import_opml(file: UploadFile = File(...)):
                         logging.warning(f"Error importing feed {feed_name}: {str(e)}")
                         skipped_count += 1
         
-        await conn.close()
+        await database.release_db_connection(conn)
         
         return JSONResponse({
             "message": "OPML import completed",
@@ -486,7 +481,7 @@ async def reorder_feeds(request: FeedReorderRequest):
                 index, feed_id, request.category
             )
         
-        await conn.close()
+        await database.release_db_connection(conn)
         return JSONResponse({"message": "Feed order updated successfully"})
         
     except Exception as e:
