@@ -118,7 +118,7 @@ const searchResultCount = $derived(
 		isLoadingContent = true;
 		articleContent = '';
 		try {
-			const response = await fetch(`/article-full-text?url=${encodeURIComponent(url)}`);
+			const response = await fetch(`/api/article-full-text?url=${encodeURIComponent(url)}`);
 			if (!response.ok) {
 				throw new Error('Failed to load article');
 			}
