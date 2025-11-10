@@ -1307,7 +1307,7 @@ async def article_full_text(url: str):
         logging.exception(f"Error fetching full text for {url}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
-@app.get("/article-full-html")
+@app.get("/api/article-full-html")
 async def article_full_html(url: str):
     try:
         a = await run_in_threadpool(lambda: Article(url, keep_article_html=True))
