@@ -16,19 +16,47 @@ IST = pytz.timezone("Asia/Kolkata")
 
 logger = logging.getLogger(__name__)
 
+# Global connection pool
+_db_pool = None
 
 # --- Database Connection ---
 
-async def get_db_connection():
-    """Get database connection - single source of truth"""
-    return await asyncpg.connect(
-        database=Config.DB_NAME,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD,
-        host=Config.DB_HOST,
-        port=Config.DB_PORT
-    )
+async def init_db_pool():
+    """Initialize database connection pool"""
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = await asyncpg.create_pool(
+            database=Config.DB_NAME,
+            user=Config.DB_USER,
+            password=Config.DB_PASSWORD,
+            host=Config.DB_HOST,
+            port=Config.DB_PORT,
+            min_size=2,
+            max_size=10,
+            command_timeout=60
+        )
+        logger.info("Database connection pool initialized")
+    return _db_pool
 
+async def close_db_pool():
+    """Close database connection pool"""
+    global _db_pool
+    if _db_pool:
+        await _db_pool.close()
+        _db_pool = None
+        logger.info("Database connection pool closed")
+
+async def get_db_connection():
+    """Get database connection from pool"""
+    if _db_pool is None:
+        await init_db_pool()
+    # Use async with to properly acquire connection from pool
+    return await _db_pool.acquire()
+
+async def release_db_connection(conn):
+    """Release database connection back to pool"""
+    if _db_pool and conn:
+        await _db_pool.release(conn)
 
 # --- Database Initialization ---
 
@@ -243,7 +271,7 @@ async def init_db():
         logger.error(f"Error initializing database: {e}")
         raise
     finally:
-        await conn.close()
+        await release_db_connection(conn)
 
 
 async def populate_default_feeds(conn):
@@ -326,7 +354,7 @@ async def get_feed_last_update(feed_url: str):
             return ensure_aware(row['last_update'], IST)
         return None
     finally:
-        await conn.close()
+        await release_db_connection(conn)
 
 
 async def update_feed_last_update(feed_url: str, new_update: datetime):
@@ -337,11 +365,12 @@ async def update_feed_last_update(feed_url: str, new_update: datetime):
     conn = await get_db_connection()
     try:
         await conn.execute(
-            '''INSERT INTO "FeedState" (feed_url, last_update) 
-               VALUES ($1, $2) 
-               ON CONFLICT (feed_url) 
-               DO UPDATE SET last_update = EXCLUDED.last_update''',
+            '''
+            INSERT INTO "FeedState" (feed_url, last_update)
+            VALUES ($1, $2)
+            ON CONFLICT (feed_url) DO UPDATE SET last_update = $2
+            ''',
             feed_url, new_update
         )
     finally:
-        await conn.close()
+        await release_db_connection(conn)

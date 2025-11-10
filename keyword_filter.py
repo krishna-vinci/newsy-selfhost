@@ -12,6 +12,7 @@ import asyncpg
 
 from ai_filter import get_openai_client, filter_article
 from config import Config
+import database
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +258,7 @@ async def send_filter_notification(
             "SELECT ntfy_enabled FROM categories WHERE name = $1", 
             category
         )
-        await conn.close()
+        await database.release_db_connection(conn)
         
         if ntfy_enabled is False:
             logger.debug(f"Ntfy notifications disabled for category: {category}")
