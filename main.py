@@ -121,6 +121,7 @@ origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://0.0.0.0:5173",
+    "http://0.0.0.0:8324",
 ]
 
 app.add_middleware(
@@ -1278,7 +1279,7 @@ async def add_feed(request: Request):
         logging.exception("Error adding feed: %s", str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
-@app.get("/article-full-text")
+@app.get("/api/article-full-text")
 async def article_full_text(url: str):
     try:
         conn = await get_db_connection()
