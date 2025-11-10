@@ -209,7 +209,7 @@ async def send_ntfy_notification(title: str, link: str, description: str, catego
     try:
         conn = await get_db_connection()
         ntfy_enabled = await conn.fetchval("SELECT ntfy_enabled FROM categories WHERE name = $1", category)
-        await conn.close()
+        await database.release_db_connection(conn)
         
         if ntfy_enabled is False:
             logging.debug(f"Ntfy notifications disabled for category: {category}")
@@ -422,7 +422,7 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
 
             await send_ntfy_notification(title, link, description, category, source_name)
 
-        await conn.close()
+        await database.release_db_connection(conn)
 
         if new_last_update > threshold:
             await update_feed_last_update(rss_url, new_last_update)
@@ -450,7 +450,7 @@ async def fetch_all_feeds_db():
         await asyncio.gather(*tasks)
     
     finally:
-        await conn.close()
+        await database.release_db_connection(conn)
         end_time = datetime.now(IST)
         logging.info("Feed update completed at %s", end_time)
 
@@ -501,14 +501,14 @@ async def get_total_articles_count(category: str = None, days: int = 2, starred_
         result = await conn.fetchrow(query, *params)
         return result['total'] if result else 0
     finally:
-        await conn.close()
+        await database.release_db_connection(conn)
 
 
 async def get_user_timezone():
     """Get user's preferred timezone from settings."""
     conn = await get_db_connection()
     timezone_str = await conn.fetchval("SELECT value FROM user_settings WHERE key = 'timezone'")
-    await conn.close()
+    await database.release_db_connection(conn)
     return pytz.timezone(timezone_str) if timezone_str else IST
 
 async def convert_article_timezone(article: dict, target_tz):
@@ -684,7 +684,7 @@ async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, 
         
         return articles
     finally:
-        await conn.close()
+        await database.release_db_connection(conn)
 
 
 async def cleanup_old_articles():
@@ -713,7 +713,7 @@ async def cleanup_old_articles():
     except Exception as e:
         logging.exception("Error during scheduled article cleanup: %s", e)
     finally:
-        await conn.close()
+        await database.release_db_connection(conn)
         logging.info("Finished scheduled cleanup of old articles.")
 
 
@@ -735,6 +735,9 @@ async def startup_event():
     
     # Initialize FastAPI Cache with Redis backend
     FastAPICache.init(RedisBackend(redis_client), prefix="fastapi-cache")
+    
+    # Initialize database connection pool
+    await database.init_db_pool()
     await init_db()
     
     # Initialize reports database
@@ -758,6 +761,8 @@ async def shutdown_event():
     global redis_client
     if redis_client:
         await redis_client.close()
+    # Close database pool
+    await database.close_db_pool()
 
 
 # --- Search Index Functions ---
@@ -809,7 +814,7 @@ async def build_search_index():
         await redis_client.set('search_index', json.dumps(search_index))
         logging.info(f"Search index built successfully with {len(search_index)} articles")
         
-        await conn.close()
+        await database.release_db_connection(conn)
     except Exception as e:
         logging.exception(f"Error building search index: {e}")
 
@@ -995,7 +1000,7 @@ async def update_feeds_config(request: Request):
             logging.exception("Error updating feed configuration in DB: %s", str(e))
             return JSONResponse({"error": "Failed to update configuration in database"}, status_code=500)
         finally:
-            await conn.close()
+            await database.release_db_connection(conn)
 
     except Exception as e:
         logging.exception("Error processing request for feed configuration update: %s", str(e))
@@ -1112,7 +1117,7 @@ async def feeds(
         return JSONResponse(content=categories_list)
         
     finally:
-        await conn.close()
+        await database.release_db_connection(conn)
 
 @app.post("/api/article/star")
 async def star_article(request: Request):
@@ -1148,7 +1153,7 @@ async def star_article(request: Request):
             logging.exception("Database error updating starred status: %s", str(e))
             return JSONResponse({"error": "Database error"}, status_code=500)
         finally:
-            await conn.close()
+            await database.release_db_connection(conn)
     
     except Exception as e:
         logging.exception("Error updating starred status: %s", str(e))
@@ -1182,7 +1187,7 @@ async def get_articles_statuses(request: Request):
             logging.exception("Database error fetching article statuses: %s", str(e))
             return JSONResponse({"error": "Database error"}, status_code=500)
         finally:
-            await conn.close()
+            await database.release_db_connection(conn)
     
     except Exception as e:
         logging.exception("Error fetching article statuses: %s", str(e))
@@ -1222,7 +1227,7 @@ async def mark_articles_as_read(request: Request):
             logging.exception("Database error marking articles as read: %s", str(e))
             return JSONResponse({"error": "Database error"}, status_code=500)
         finally:
-            await conn.close()
+            await database.release_db_connection(conn)
     
     except Exception as e:
         logging.exception("Error marking articles as read: %s", str(e))
@@ -1273,7 +1278,7 @@ async def add_feed(request: Request):
             logging.exception("Database error adding feed: %s", str(e))
             return JSONResponse({"error": "Database error"}, status_code=500)
         finally:
-            await conn.close()
+            await database.release_db_connection(conn)
 
     except Exception as e:
         logging.exception("Error adding feed: %s", str(e))
@@ -1284,7 +1289,7 @@ async def article_full_text(url: str):
     try:
         conn = await get_db_connection()
         content_html = await conn.fetchval('SELECT content FROM articles WHERE link = $1', url)
-        await conn.close()
+        await database.release_db_connection(conn)
 
         if not content_html:
             # Fallback to fetching live if not in DB
@@ -1307,7 +1312,7 @@ async def article_full_text(url: str):
         logging.exception(f"Error fetching full text for {url}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
-@app.get("/article-full-html")
+@app.get("/api/article-full-html")
 async def article_full_html(url: str):
     try:
         a = await run_in_threadpool(lambda: Article(url, keep_article_html=True))
@@ -1339,7 +1344,7 @@ async def update_feed(feed_id: int, request: Request):
             'UPDATE feeds SET name = $1, url = $2, category = $3, priority = $4, retention_days = $5 WHERE id = $6',
             name, url, category, priority, retention_days, feed_id
         )
-        await conn.close()
+        await database.release_db_connection(conn)
         return JSONResponse({"message": "Feed updated successfully."})
     except Exception as e:
         logging.error(f"Error updating feed: {e}")
@@ -1351,7 +1356,7 @@ async def delete_feed(feed_id: int):
     try:
         conn = await get_db_connection()
         await conn.execute('DELETE FROM feeds WHERE id = $1', (feed_id,))
-        await conn.close()
+        await database.release_db_connection(conn)
         return JSONResponse({"message": "Feed deleted successfully."})
     except Exception as e:
         logging.error(f"Error deleting feed: {e}")
@@ -1380,7 +1385,7 @@ async def update_settings(request: Request):
                 key, value
             )
         
-        await conn.close()
+        await database.release_db_connection(conn)
         return JSONResponse({"message": "Settings updated successfully"})
     except Exception as e:
         logging.error(f"Error updating settings: {e}")
@@ -1411,7 +1416,7 @@ async def update_category_order(request: Request):
         conn = await get_db_connection()
         for index, category_id in enumerate(categories_order):
             await conn.execute("UPDATE categories SET priority = $1 WHERE id = $2", index, category_id)
-        await conn.close()
+        await database.release_db_connection(conn)
         return JSONResponse({"message": "Category order updated."})
     except Exception as e:
         logging.error(f"Error updating category order: {e}")
@@ -1424,7 +1429,7 @@ async def set_default_category(category_id: int):
         conn = await get_db_connection()
         await conn.execute("UPDATE categories SET is_default = false WHERE is_default = true")
         await conn.execute("UPDATE categories SET is_default = true WHERE id = $1", category_id)
-        await conn.close()
+        await database.release_db_connection(conn)
         return JSONResponse({"message": "Default category updated."})
     except Exception as e:
         logging.error(f"Error setting default category: {e}")
@@ -1439,7 +1444,7 @@ async def toggle_category_ntfy(category_id: int, request: Request):
         
         conn = await get_db_connection()
         await conn.execute("UPDATE categories SET ntfy_enabled = $1 WHERE id = $2", ntfy_enabled, category_id)
-        await conn.close()
+        await database.release_db_connection(conn)
         
         return JSONResponse({"message": f"Ntfy notifications {'enabled' if ntfy_enabled else 'disabled'} for category."})
     except Exception as e:
@@ -1459,7 +1464,7 @@ async def delete_category(category_id: int):
         await conn.execute("DELETE FROM feeds WHERE category = $1", category_name)
         await conn.execute("DELETE FROM categories WHERE id = $1", category_id)
         
-        await conn.close()
+        await database.release_db_connection(conn)
         return JSONResponse({"message": f"Category '{category_name}' and its feeds have been deleted."})
     except Exception as e:
         logging.error(f"Error deleting category: {e}")
@@ -1474,7 +1479,7 @@ async def get_category_ai_settings(category_id: int):
             "SELECT ai_prompt, ai_enabled FROM categories WHERE id = $1",
             category_id
         )
-        await conn.close()
+        await database.release_db_connection(conn)
         
         if not category:
             raise HTTPException(status_code=404, detail="Category not found")
@@ -1506,7 +1511,7 @@ async def update_category_ai_settings(category_id: int, request: Request):
         )
         
         if not old_category:
-            await conn.close()
+            await database.release_db_connection(conn)
             raise HTTPException(status_code=404, detail="Category not found")
         
         # Update settings
@@ -1515,7 +1520,7 @@ async def update_category_ai_settings(category_id: int, request: Request):
             ai_prompt, ai_enabled, category_id
         )
         
-        await conn.close()
+        await database.release_db_connection(conn)
         
         # Note: We don't automatically reprocess old articles to save costs
         # Users must manually click "Reprocess Articles" if they want to filter existing articles
@@ -1543,17 +1548,17 @@ async def reprocess_category_ai_filter(category_id: int):
         )
         
         if not category:
-            await conn.close()
+            await database.release_db_connection(conn)
             raise HTTPException(status_code=404, detail="Category not found")
         
         if not category['ai_enabled']:
-            await conn.close()
+            await database.release_db_connection(conn)
             raise HTTPException(status_code=400, detail="AI filtering not enabled for this category")
         
         # Reprocess articles
         stats = await ai_filter.reprocess_category_articles(category_id, conn)
         
-        await conn.close()
+        await database.release_db_connection(conn)
         
         return JSONResponse(content={
             "success": True,
@@ -1628,7 +1633,7 @@ async def get_filters(category_id: int = None):
                 ORDER BY f.created_at DESC
             """)
         
-        await conn.close()
+        await database.release_db_connection(conn)
         
         # Convert datetime objects to ISO strings for JSON serialization
         filters_list = []
@@ -1671,7 +1676,7 @@ async def create_filter(request: Request):
         if category_id:
             category_exists = await conn.fetchval("SELECT id FROM categories WHERE id = $1", category_id)
             if not category_exists:
-                await conn.close()
+                await database.release_db_connection(conn)
                 return JSONResponse({"error": "Category not found"}, status_code=404)
         
         # Insert filter
@@ -1682,7 +1687,7 @@ async def create_filter(request: Request):
             RETURNING id
         """, name, category_id, filter_type, filter_value, auto_star, auto_notify, enabled)
         
-        await conn.close()
+        await database.release_db_connection(conn)
         
         return JSONResponse(content={
             "message": "Filter created successfully",
@@ -1716,7 +1721,7 @@ async def update_filter(filter_id: int, request: Request):
             WHERE id = $6
         """, name, filter_value, auto_star, auto_notify, enabled, filter_id)
         
-        await conn.close()
+        await database.release_db_connection(conn)
         
         if result == 'UPDATE 0':
             return JSONResponse({"error": "Filter not found"}, status_code=404)
@@ -1735,7 +1740,7 @@ async def delete_filter(filter_id: int):
         
         result = await conn.execute("DELETE FROM article_filters WHERE id = $1", filter_id)
         
-        await conn.close()
+        await database.release_db_connection(conn)
         
         if result == 'DELETE 0':
             return JSONResponse({"error": "Filter not found"}, status_code=404)
@@ -1770,7 +1775,7 @@ async def get_filter_statistics_endpoint(filter_id: int, days: int = 30):
             GROUP BY f.id, f.name, f.filter_type, f.filter_value
         """, threshold, filter_id)
         
-        await conn.close()
+        await database.release_db_connection(conn)
         
         if not stats:
             return JSONResponse({"error": "Filter not found"}, status_code=404)
@@ -1787,7 +1792,7 @@ async def get_all_filters_statistics(category_id: int = None, days: int = 30):
     try:
         conn = await get_db_connection()
         stats = await keyword_filter.get_filter_statistics(conn, category_id, days)
-        await conn.close()
+        await database.release_db_connection(conn)
         
         return JSONResponse(content=stats)
     except Exception as e:
@@ -1812,7 +1817,7 @@ async def summarize_article(request: Request):
         article = await conn.fetchrow("""
             SELECT title, description, content FROM articles WHERE link = $1
         """, article_link)
-        await conn.close()
+        await database.release_db_connection(conn)
         
         if not article:
             return JSONResponse({"error": "Article not found"}, status_code=404)
