@@ -3,11 +3,11 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-      target: production
+      target: development
     ports:
       - "8324:8324"
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=development
       - API_BASE_URL=http://newsy-backend:8321
     restart: unless-stopped
     networks:
@@ -15,9 +15,18 @@ services:
       - caddy-net
     depends_on:
       - newsy-backend
+    develop:
+      watch:
+        - action: sync
+          path: ./frontend
+          target: /app
+          ignore:
+            - node_modules/
 
   newsy-backend:
-    build: .
+    build:
+      context: .
+      dockerfile: dockerfile
     ports:
       - "8321:8321"
     env_file:
@@ -25,6 +34,15 @@ services:
     volumes:
       - backup_data:/app/data/backups
       - reports_data:/app/reports
+    command: ["fastapi", "dev", "main.py", "--host", "0.0.0.0", "--port", "8321"]
+    develop:
+      watch:
+        - action: sync
+          path: .
+          target: /app
+          ignore:
+            - __pycache__/
+            - .venv/
     restart: unless-stopped
     networks:
       - db-net
@@ -62,6 +80,6 @@ volumes:
 
 networks:
   db-net:
-    external: true  # Make sure this is already created: docker network create db-net
+    external: true
   caddy-net:
     external: true

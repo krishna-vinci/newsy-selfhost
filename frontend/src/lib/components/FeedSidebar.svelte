@@ -10,7 +10,8 @@ import Checkbox from '$lib/components/ui/checkbox/index.svelte';
 import * as Select from '$lib/components/ui/select/index.js';
 import * as Switch from '$lib/components/ui/switch/index.ts';
 import * as Tabs from '$lib/components/ui/tabs/index.js';
-import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash } from '@lucide/svelte';
+import * as Dialog from '$lib/components/ui/dialog/index.ts';
+import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash, CheckCircle, Star } from '@lucide/svelte';
 import { dndzone } from 'svelte-dnd-action';
 import { settings } from '$lib/stores/settings';
 
@@ -62,7 +63,6 @@ let editingFeedCategory = $state('');
 // Category settings modal state
 let showCategorySettingsModal = $state(false);
 let categoriesList = $state<Category[]>([]);
-let canCloseModal = $state(true);
 let activeTab = $state('categories');
 
 // Timezone settings state
@@ -81,6 +81,21 @@ let selectedCategoryForFeed = $state('');
 let newCategoryName = $state('');
 let useExistingCategory = $state(true);
 let newFeedRetentionDays = $state<number | undefined>(undefined);
+
+// Keyword/Topic filter state
+let keywordFilters = $state<any[]>([]);
+let showFilterDialog = $state(false);
+let editingFilter = $state<any | null>(null);
+let filterForm = $state({
+	name: '',
+	category_id: null as number | null,
+	filter_type: 'keyword' as 'keyword' | 'topic',
+	filter_value: '',
+	auto_star: true,
+	auto_notify: true,
+	enabled: true
+});
+let aiFilterSubTab = $state('prompt');
 
 // Derived
 const categories = $derived(Object.keys(feedConfig));
@@ -280,17 +295,10 @@ function openCategorySettings() {
 	loadBackups(); // Load backups when opening settings
 	activeTab = 'categories'; // Reset to categories tab
 	showCategorySettingsModal = true;
-	canCloseModal = false;
-	// Allow closing after a short delay to prevent accidental closes
-	setTimeout(() => {
-		canCloseModal = true;
-	}, 100);
 }
 
 function closeCategorySettings() {
-	if (canCloseModal) {
-		showCategorySettingsModal = false;
-	}
+	showCategorySettingsModal = false;
 }
 
 async function handleDndConsider(e: CustomEvent) {
@@ -431,6 +439,91 @@ async function reprocessCategory(categoryId: number) {
 		toast.success(`Reprocessing complete! ${result.stats.matched} of ${result.stats.total} articles matched`);
 	} catch (error) {
 		toast.error('Failed to reprocess category');
+	}
+}
+
+// Keyword/Topic Filter Functions
+async function loadKeywordFilters() {
+	try {
+		const response = await fetch('/api/filters');
+		if (!response.ok) throw new Error('Failed to load filters');
+		keywordFilters = await response.json();
+	} catch (error) {
+		console.error('Error loading keyword filters:', error);
+		toast.error('Failed to load keyword filters');
+	}
+}
+
+function openAddFilterDialog() {
+	editingFilter = null;
+	filterForm = {
+		name: '',
+		category_id: null,
+		filter_type: 'keyword',
+		filter_value: '',
+		auto_star: true,
+		auto_notify: true,
+		enabled: true
+	};
+	showFilterDialog = true;
+}
+
+function editFilter(filter: any) {
+	editingFilter = filter;
+	filterForm = {
+		name: filter.name,
+		category_id: filter.category_id,
+		filter_type: filter.filter_type,
+		filter_value: filter.filter_value,
+		auto_star: filter.auto_star,
+		auto_notify: filter.auto_notify,
+		enabled: filter.enabled
+	};
+	showFilterDialog = true;
+}
+
+async function saveFilter() {
+	try {
+		if (!filterForm.name.trim() || !filterForm.filter_value.trim()) {
+			toast.error('Name and filter value are required');
+			return;
+		}
+
+		const url = editingFilter ? `/api/filters/${editingFilter.id}` : '/api/filters';
+		const method = editingFilter ? 'PUT' : 'POST';
+
+		const response = await fetch(url, {
+			method,
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(filterForm)
+		});
+
+		if (!response.ok) throw new Error('Failed to save filter');
+
+		toast.success(editingFilter ? 'Filter updated successfully' : 'Filter created successfully');
+		showFilterDialog = false;
+		await loadKeywordFilters();
+	} catch (error) {
+		console.error('Error saving filter:', error);
+		toast.error('Failed to save filter');
+	}
+}
+
+async function deleteKeywordFilter(filterId: number) {
+	if (!confirm('Are you sure you want to delete this filter?')) return;
+
+	try {
+		const response = await fetch(`/api/filters/${filterId}`, {
+			method: 'DELETE'
+		});
+
+		if (!response.ok) throw new Error('Failed to delete filter');
+
+		toast.success('Filter deleted successfully');
+		await loadKeywordFilters();
+	} catch (error) {
+		console.error('Error deleting filter:', error);
+		toast.error('Failed to delete filter');
 	}
 }
 
@@ -581,19 +674,24 @@ function handleCategoryClick(category: string) {
 }
 
 // Lifecycle
-onMount(async () => {
+onMount(() => {
 	loadFeedConfig();
-	await settings.load();
+	settings.load();
 	
 	// Subscribe to settings changes
-	const unsubscribe = settings.subscribe(s => {
+	const unsubscribe = settings.subscribe((s: { timezone: string; }) => {
 		selectedTimezone = s.timezone;
 	});
 	
 	// Cleanup subscription on unmount
-	return () => {
-		unsubscribe();
-	};
+	return unsubscribe;
+});
+
+// Load keyword filters when category settings modal opens
+$effect(() => {
+	if (showCategorySettingsModal) {
+		loadKeywordFilters();
+	}
 });
 </script>
 
@@ -861,386 +959,455 @@ onMount(async () => {
 {/if}
 
 <!-- Category Settings Modal -->
-{#if showCategorySettingsModal}
-	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-		role="presentation"
-		onclick={(e) => {
-			if (e.target === e.currentTarget && canCloseModal) {
-				closeCategorySettings();
-			}
-		}}
-	>
-		<div class="w-full max-w-5xl rounded-lg bg-card p-6 shadow-lg">
-			<h3 class="mb-4 text-lg font-semibold">Settings</h3>
+<Dialog.Root open={showCategorySettingsModal} onOpenChange={(o) => (showCategorySettingsModal = o)}>
+  <Dialog.Content class="max-w-7xl p-0">
+    <div class="p-6">
+      <h3 class="mb-4 text-lg font-semibold">Settings</h3>
+      <Tabs.Root bind:value={activeTab} class="w-full">
+        <Tabs.List class="grid w-full grid-cols-4">
+          <Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
+          <Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
+          <Tabs.Trigger value="timezone">Timezone</Tabs.Trigger>
+          <Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
+        </Tabs.List>
+        <Tabs.Content value="categories" class="mt-4 min-h-[400px]">
+          <div
+            class="mb-4 max-h-[60vh] overflow-y-auto"
+            use:dndzone={{ items: categoriesList }}
+            onconsider={handleDndConsider}
+            onfinalize={handleDndFinalize}
+          >
+            {#each categoriesList as category (category.id)}
+              {@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
+              <div class="mb-3 rounded-md bg-background p-4 border border-border">
+                <div class="flex items-center gap-3">
+                  <GripVertical class="h-5 w-5 cursor-grab text-muted-foreground flex-shrink-0" />
+                  <div class="flex-1 min-w-0">
+                    <div class="font-medium text-sm mb-1">{category.name}</div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs text-muted-foreground font-mono bg-muted px-2 py-0.5 rounded">{topicName}</span>
+                      <Button variant="ghost" size="icon" class="h-5 w-5" onclick={() => copyToClipboard(topicName, 'Topic copied to clipboard')}>
+                        <Copy class="h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-3 flex-shrink-0">
+                    <div class="flex items-center gap-2">
+                      <Bell class="h-4 w-4 text-muted-foreground" />
+                      <Switch.Switch checked={category.ntfy_enabled} onCheckedChange={() => toggleCategoryNtfy(category)} />
+                      <span class="text-xs text-muted-foreground min-w-[24px]">{category.ntfy_enabled ? 'On' : 'Off'}</span>
+                    </div>
+                    <Button variant={category.is_default ? 'secondary' : 'ghost'} size="sm" class="text-xs whitespace-nowrap" onclick={() => setDefaultCategory(category.id)}>
+                      {category.is_default ? 'Default' : 'Set Default'}
+                    </Button>
+                    <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => deleteCategory(category.id)}>
+                      <Trash2 class="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </Tabs.Content>
+        <Tabs.Content value="ai-filters" class="mt-4 min-h-[400px]">
+          <div class="w-full">
+            <div class="flex gap-2 mb-4 border-b">
+              <button type="button" class="px-4 py-2 text-sm font-medium transition-colors {aiFilterSubTab === 'prompt' ? 'border-b-2 border-primary text-foreground' : 'text-muted-foreground hover:text-foreground'}" onclick={() => aiFilterSubTab = 'prompt'}>Prompt-Based Filter</button>
+              <button type="button" class="px-4 py-2 text-sm font-medium transition-colors {aiFilterSubTab === 'keywords' ? 'border-b-2 border-primary text-foreground' : 'text-muted-foreground hover:text-foreground'}" onclick={() => aiFilterSubTab = 'keywords'}>Keywords & Topics</button>
+            </div>
+            {#if aiFilterSubTab === 'prompt'}
+              <div class="space-y-4 p-4">
+                <div class="space-y-4 max-h-[60vh] overflow-y-auto">
+                  {#each categoriesList as category (category.id)}
+                    <div class="rounded-lg border border-border bg-background p-4 space-y-3">
+                      <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-3">
+                          <h5 class="font-medium">{category.name}</h5>
+                          {#if category.ai_enabled}
+                            <span class="text-xs bg-green-500/10 text-green-500 px-2 py-1 rounded">Active</span>
+                          {:else}
+                            <span class="text-xs bg-muted text-muted-foreground px-2 py-1 rounded">Inactive</span>
+                          {/if}
+                        </div>
+                        <Switch.Switch checked={category.ai_enabled} onCheckedChange={() => toggleCategoryAI(category)} />
+                      </div>
+                      {#if category.ai_enabled || category.ai_prompt}
+                        <div class="space-y-2">
+                          <label class="text-xs font-medium text-muted-foreground">Filter Prompt</label>
+                          <textarea bind:value={category.ai_prompt} placeholder="e.g., I'm interested in articles about artificial intelligence, machine learning, and software development..." class="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none" onblur={() => { if (category.ai_prompt !== null && category.ai_prompt.trim() !== '') { saveAIPrompt(category, category.ai_prompt); } }}></textarea>
+                          <div class="flex gap-2">
+                            <Button size="sm" variant="outline" onclick={() => { if (category.ai_prompt) { saveAIPrompt(category, category.ai_prompt); } }} disabled={!category.ai_prompt || category.ai_prompt.trim() === ''}>Save Prompt</Button>
+                            <Button size="sm" variant="secondary" onclick={() => reprocessCategory(category.id)} disabled={!category.ai_enabled || !category.ai_prompt} title="Filter existing articles with current prompt">Reprocess Existing Articles</Button>
+                          </div>
+                        </div>
+                      {:else}
+                        <p class="text-xs text-muted-foreground italic">Enable AI filtering to define a custom prompt for this category.</p>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              </div>
+            {:else}
+              <div class="space-y-4 p-4">
+                <div class="mb-4 flex items-center justify-between">
+                  <div>
+                    <h4 class="text-sm font-semibold mb-2">Keyword & Topic Filters</h4>
+                    <p class="text-sm text-muted-foreground">Define keywords or topics to automatically star and notify.</p>
+                  </div>
+                  <Button size="sm" onclick={openAddFilterDialog}><Plus class="h-4 w-4 mr-1" />Add Filter</Button>
+                </div>
+                <div class="space-y-3 max-h-[60vh] overflow-y-auto">
+                  {#if keywordFilters.length === 0}
+                    <div class="text-center py-8 text-muted-foreground">
+                      <p class="text-sm">No filters created yet.</p>
+                      <p class="text-xs mt-1">Click "Add Filter" to create your first filter.</p>
+                    </div>
+                  {:else}
+                    {#each keywordFilters as filter (filter.id)}
+                      <div class="rounded-lg border border-border bg-background p-4">
+                        <div class="flex items-center justify-between gap-3">
+                          <div class="flex items-center gap-3 flex-1">
+                            <div class="flex-1 min-w-0">
+                              <h5 class="font-medium truncate">{filter.name}</h5>
+                              <div class="flex items-center gap-2 mt-1">
+                                <span class="text-xs px-2 py-0.5 rounded {filter.filter_type === 'keyword' ? 'bg-blue-500/10 text-blue-500' : 'bg-purple-500/10 text-purple-500'}">{filter.filter_type === 'keyword' ? 'Keyword' : 'Topic'}</span>
+                                {#if filter.category_name}
+                                  <span class="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded truncate">{filter.category_name}</span>
+                                {:else}
+                                  <span class="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded">Global</span>
+                                {/if}
+                                {#if filter.enabled}
+                                  <span class="text-xs bg-green-500/10 text-green-500 px-2 py-0.5 rounded">Active</span>
+                                {:else}
+                                  <span class="text-xs bg-muted text-muted-foreground px-2 py-0.5 rounded">Inactive</span>
+                                {/if}
+                              </div>
+                            </div>
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <Switch.Switch
+                              checked={filter.enabled}
+                              onCheckedChange={async (checked) => {
+                                try {
+                                  const response = await fetch(`/api/filters/${filter.id}`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ ...filter, enabled: checked })
+                                  });
+                                  if (response.ok) {
+                                    filter.enabled = checked;
+                                    toast.success(checked ? 'Filter enabled' : 'Filter disabled');
+                                    await loadKeywordFilters();
+                                  } else {
+                                    toast.error('Failed to update filter');
+                                  }
+                                } catch (error) {
+                                  toast.error('Failed to update filter');
+                                }
+                              }}
+                              title={filter.enabled ? 'Disable filter' : 'Enable filter'}
+                            />
+                            <Button variant="outline" size="sm" onclick={() => editFilter(filter)} title="Edit filter"><Pencil class="h-4 w-4 mr-1" />Edit</Button>
+                            <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => deleteKeywordFilter(filter.id)} title="Delete filter"><Trash2 class="h-4 w-4" /></Button>
+                          </div>
+                        </div>
+                      </div>
+                    {/each}
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          </div>
+        </Tabs.Content>
+        <Tabs.Content value="timezone" class="mt-4 min-h-[400px]">
+          <div class="space-y-4 p-4">
+            <div>
+              <h4 class="text-sm font-medium mb-2">Select Your Timezone</h4>
+              <p class="text-sm text-muted-foreground mb-4">Choose your preferred timezone for displaying article timestamps.</p>
+            </div>
+            <div class="space-y-2">
+              <label class="text-sm font-medium">Timezone</label>
+              <Select.Root type="single" bind:value={selectedTimezone}>
+                <Select.Trigger class="w-full">{selectedTimezone === 'Asia/Kolkata' ? 'IST (Asia/Kolkata)' : 'UTC'}</Select.Trigger>
+                <Select.Content>
+                  <Select.Item value="Asia/Kolkata" onclick={() => updateTimezone('Asia/Kolkata')}>IST (Asia/Kolkata)</Select.Item>
+                  <Select.Item value="UTC" onclick={() => updateTimezone('UTC')}>UTC</Select.Item>
+                </Select.Content>
+              </Select.Root>
+            </div>
+          </div>
+        </Tabs.Content>
+        <Tabs.Content value="backup" class="mt-4 min-h-[400px]">
+          <div class="space-y-6 p-4">
+            <!-- Database Backups Section -->
+            <div class="space-y-4">
+              <div class="flex items-center justify-between">
+                <div>
+                  <h4 class="text-sm font-semibold flex items-center gap-2">
+                    <Database class="h-4 w-4" />
+                    Database Backups
+                  </h4>
+                  <p class="text-xs text-muted-foreground mt-1">
+                    Create and manage full database backups for disaster recovery
+                  </p>
+                </div>
+                <Button onclick={createBackup} disabled={isCreatingBackup} size="sm" class="gap-2">
+                  {#if isCreatingBackup}
+                    <Loader2 class="h-4 w-4 animate-spin" />
+                    Creating...
+                  {:else}
+                    <Plus class="h-4 w-4" />
+                    Create Backup
+                  {/if}
+                </Button>
+              </div>
 
-			<Tabs.Root bind:value={activeTab} class="w-full">
-				<Tabs.List class="grid w-full grid-cols-4">
-					<Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
-					<Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
-					<Tabs.Trigger value="timezone">Timezone</Tabs.Trigger>
-					<Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
-				</Tabs.List>
+              {#if activeTab === 'backup'}
+                {#if !backups.length && !isLoadingBackups}
+                  <div class="rounded-md border border-dashed p-8 text-center">
+                    <Database class="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+                    <p class="text-sm text-muted-foreground">No backups available</p>
+                    <p class="text-xs text-muted-foreground mt-1">Create your first backup to get started</p>
+                  </div>
+                {:else}
+                  <div class="space-y-2 max-h-[200px] overflow-y-auto">
+                    {#each backups as backup}
+                      <div class="flex items-center justify-between rounded-md border p-3 bg-background">
+                        <div class="flex-1 min-w-0">
+                          <p class="text-sm font-medium truncate">{backup.filename}</p>
+                          <p class="text-xs text-muted-foreground">
+                            {new Date(backup.created_at).toLocaleString()} • {backup.size_mb} MB
+                          </p>
+                        </div>
+                        <div class="flex items-center gap-1 ml-2">
+                          <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => downloadBackup(backup.filename)}>
+                            <Download class="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => restoreBackup(backup.filename)} disabled={isRestoringBackup}>
+                            <Upload class="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" class="h-8 w-8 text-destructive" onclick={() => deleteBackup(backup.filename)}>
+                            <Trash class="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              {/if}
+            </div>
 
-				<!-- Categories Tab -->
-				<Tabs.Content value="categories" class="mt-4 min-h-[400px]">
-					<div
-						class="mb-4 max-h-[60vh] overflow-y-auto"
-						use:dndzone={{ items: categoriesList }}
-						onconsider={handleDndConsider}
-						onfinalize={handleDndFinalize}
+            <!-- Data Export Section -->
+            <div class="space-y-4 pt-4 border-t">
+              <div>
+                <h4 class="text-sm font-semibold flex items-center gap-2">
+                  <FileDown class="h-4 w-4" />
+                  Export Articles
+                </h4>
+                <p class="text-xs text-muted-foreground mt-1">
+                  Download your articles in portable formats
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <Button variant="outline" size="sm" onclick={() => exportArticles('csv')} class="gap-2">
+                  <FileDown class="h-4 w-4" />
+                  Export as CSV
+                </Button>
+                <Button variant="outline" size="sm" onclick={() => exportArticles('json')} class="gap-2">
+                  <FileDown class="h-4 w-4" />
+                  Export as JSON
+                </Button>
+              </div>
+            </div>
+
+            <!-- OPML Import/Export Section -->
+            <div class="space-y-4 pt-4 border-t">
+              <div>
+                <h4 class="text-sm font-semibold flex items-center gap-2">
+                  <FileText class="h-4 w-4" />
+                  OPML Feed Migration
+                </h4>
+                <p class="text-xs text-muted-foreground mt-1">
+                  Import or export your feed subscriptions
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <Button variant="outline" size="sm" onclick={exportOPML} class="gap-2">
+                  <FileDown class="h-4 w-4" />
+                  Export OPML
+                </Button>
+                <label class="cursor-pointer">
+                  <input type="file" accept=".opml,.xml" onchange={importOPML} class="hidden" />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="gap-2"
+                    onclick={(e) => {
+                      e.preventDefault();
+                      (e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement)?.click();
+                    }}
+                  >
+                    <FileUp class="h-4 w-4" />
+                    Import OPML
+                  </Button>
+                </label>
+              </div>
+              <div class="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                <p><strong>Note:</strong> Categorized feeds will be imported into matching categories. Uncategorized feeds will be placed in a "Feeds" category. Duplicate feeds will be skipped.</p>
+              </div>
+            </div>
+          </div>
+        </Tabs.Content>
+      </Tabs.Root>
+      <div class="mt-6 flex justify-end"><Button variant="outline" onclick={closeCategorySettings}>Close</Button></div>
+    </div>
+    <!-- ... -->
+  </Dialog.Content>
+</Dialog.Root>
+
+<!-- ... -->
+<Dialog.Root open={showFilterDialog} onOpenChange={(o) => (showFilterDialog = o)}>
+  <Dialog.Content class="max-w-2xl mx-4 p-6">
+    <h3 class="mb-4 text-lg font-semibold">{editingFilter ? 'Edit Filter' : 'Add New Filter'}</h3>
+    <div class="space-y-4">
+				<!-- Filter Name -->
+				<div>
+					<label class="text-sm font-medium mb-1 block">Filter Name</label>
+					<Input
+						type="text"
+						bind:value={filterForm.name}
+						placeholder="e.g., OpenAI News, Quantum Computing"
+					/>
+				</div>
+
+				<!-- Filter Type -->
+				<div>
+					<label class="text-sm font-medium mb-1 block">Filter Type</label>
+					<Select.Root
+						type="single"
+						bind:value={filterForm.filter_type}
 					>
-						{#each categoriesList as category (category.id)}
-							{@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
-							<div class="mb-3 rounded-md bg-background p-3 border border-border">
-								<div class="flex items-center gap-4">
-									<GripVertical class="h-5 w-5 cursor-grab text-muted-foreground flex-shrink-0" />
-									<span class="font-medium flex-grow min-w-0 truncate">{category.name}</span>
+						<Select.Trigger class="w-full">
+							{filterForm.filter_type === 'keyword' ? 'Keyword (Simple text matching)' : 'Topic (AI-powered semantic matching)'}
+						</Select.Trigger>
+						<Select.Content>
+							<Select.Item value="keyword">Keyword (Simple text matching)</Select.Item>
+							<Select.Item value="topic">Topic (AI-powered semantic matching)</Select.Item>
+						</Select.Content>
+					</Select.Root>
+					<p class="text-xs text-muted-foreground mt-1">
+						{filterForm.filter_type === 'keyword' 
+							? 'Matches exact text in article titles and descriptions' 
+							: 'Uses AI to match articles semantically related to your topic'}
+					</p>
+				</div>
 
-									<div class="flex items-center justify-between gap-2 w-[320px] flex-shrink-0">
-										<span class="text-xs text-muted-foreground font-mono bg-muted px-2 py-1 rounded truncate">
-											{topicName}
-										</span>
-										<Button
-											variant="ghost"
-											size="icon"
-											class="h-6 w-6"
-											onclick={() => copyToClipboard(topicName, 'Topic copied to clipboard')}
-										>
-											<Copy class="h-3 w-3" />
-										</Button>
-									</div>
+				<!-- Filter Value -->
+				<div>
+					<label class="text-sm font-medium mb-1 block">
+						{filterForm.filter_type === 'keyword' ? 'Keyword' : 'Topic Description'}
+					</label>
+					{#if filterForm.filter_type === 'keyword'}
+						<Input
+							type="text"
+							bind:value={filterForm.filter_value}
+							placeholder="e.g., OpenAI, GPT-4, artificial intelligence"
+						/>
+						<p class="text-xs text-muted-foreground mt-1">
+							Case-insensitive text that will be searched in article content
+						</p>
+					{:else}
+						<textarea
+							bind:value={filterForm.filter_value}
+							placeholder="e.g., Articles about the impact of quantum computing on cybersecurity and encryption"
+							class="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+						></textarea>
+						<p class="text-xs text-muted-foreground mt-1">
+							Describe the topic you're interested in. Be specific for better AI matching.
+						</p>
+					{/if}
+				</div>
 
-									<div class="flex items-center gap-2 w-[120px] flex-shrink-0">
-										<Bell class="h-4 w-4 text-muted-foreground" />
-										<Switch.Switch
-											checked={category.ntfy_enabled}
-											onCheckedChange={() => toggleCategoryNtfy(category)}
-										/>
-										<span class="text-xs text-muted-foreground w-6">{category.ntfy_enabled ? 'On' : 'Off'}</span>
-									</div>
-
-									<div class="flex items-center gap-2 w-[180px] flex-shrink-0 justify-end">
-										<Button
-											variant={category.is_default ? 'secondary' : 'ghost'}
-											size="sm"
-											class="text-xs"
-											onclick={() => setDefaultCategory(category.id)}
-										>
-											{category.is_default ? 'Default' : 'Set Default'}
-										</Button>
-										<Button
-											variant="ghost"
-											size="icon"
-											class="h-8 w-8 flex-shrink-0"
-											onclick={() => deleteCategory(category.id)}
-										>
-											<Trash2 class="h-4 w-4" />
-										</Button>
-									</div>
-								</div>
-							</div>
-						{/each}
-					</div>
-				</Tabs.Content>
-
-				<!-- AI Filters Tab -->
-				<Tabs.Content value="ai-filters" class="mt-4 min-h-[400px]">
-					<div class="space-y-4 p-4">
-						<div class="mb-4">
-							<h4 class="text-sm font-semibold mb-2">AI-Powered Content Filtering</h4>
-							<p class="text-sm text-muted-foreground">
-								Use AI to filter articles based on your interests. When enabled, <strong>only new incoming articles</strong> will be filtered automatically. Use "Reprocess Articles" to filter existing articles.
-							</p>
-						</div>
-
-						<div class="space-y-4 max-h-[60vh] overflow-y-auto">
-							{#each categoriesList as category (category.id)}
-								<div class="rounded-lg border border-border bg-background p-4 space-y-3">
-									<!-- Header with Category Name and Toggle -->
-									<div class="flex items-center justify-between">
-										<div class="flex items-center gap-3">
-											<h5 class="font-medium">{category.name}</h5>
-											{#if category.ai_enabled}
-												<span class="text-xs bg-green-500/10 text-green-500 px-2 py-1 rounded">Active</span>
-											{:else}
-												<span class="text-xs bg-muted text-muted-foreground px-2 py-1 rounded">Inactive</span>
-											{/if}
-										</div>
-										<Switch.Switch
-											checked={category.ai_enabled}
-											onCheckedChange={() => toggleCategoryAI(category)}
-										/>
-									</div>
-
-									<!-- Prompt Input -->
-									{#if category.ai_enabled || category.ai_prompt}
-										<div class="space-y-2">
-											<label class="text-xs font-medium text-muted-foreground">Filter Prompt</label>
-											<textarea
-												bind:value={category.ai_prompt}
-												placeholder="e.g., I'm interested in articles about artificial intelligence, machine learning, and software development..."
-												class="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none"
-												onblur={() => {
-													if (category.ai_prompt !== null && category.ai_prompt.trim() !== '') {
-														saveAIPrompt(category, category.ai_prompt);
-													}
-												}}
-											></textarea>
-											<p class="text-xs text-muted-foreground">
-												Describe what types of articles you want to see. Be specific for better results.
-											</p>
-										</div>
-
-										<!-- Action Buttons -->
-										<div class="flex gap-2">
-											<Button
-												size="sm"
-												variant="outline"
-												onclick={() => {
-													if (category.ai_prompt) {
-														saveAIPrompt(category, category.ai_prompt);
-													}
-												}}
-												disabled={!category.ai_prompt || category.ai_prompt.trim() === ''}
-											>
-												Save Prompt
-											</Button>
-											<Button
-												size="sm"
-												variant="secondary"
-												onclick={() => reprocessCategory(category.id)}
-												disabled={!category.ai_enabled || !category.ai_prompt}
-												title="Filter existing articles with current prompt"
-											>
-												Reprocess Existing Articles
-											</Button>
-										</div>
-									{/if}
-
-									{#if !category.ai_enabled && !category.ai_prompt}
-										<p class="text-xs text-muted-foreground italic">
-											Enable AI filtering to define a custom prompt for this category.
-										</p>
-									{/if}
-								</div>
+				<!-- Category Selection -->
+				<div>
+					<label class="text-sm font-medium mb-1 block">Category (Optional)</label>
+					<Select.Root
+						type="single"
+						value={filterForm.category_id?.toString() ?? 'null'}
+						onValueChange={(v) => {
+							if (v) {
+								filterForm.category_id = v === 'null' ? null : parseInt(v, 10);
+							} else {
+								filterForm.category_id = null;
+							}
+						}}
+					>
+						<Select.Trigger class="w-full">
+							{filterForm.category_id ? categoriesList.find(c => c.id === filterForm.category_id)?.name ?? 'Select category' : 'Global (All Categories)'}
+						</Select.Trigger>
+						<Select.Content>
+							<Select.Item value="null">Global (All Categories)</Select.Item>
+							{#each categoriesList as category}
+								<Select.Item value={category.id.toString()}>{category.name}</Select.Item>
 							{/each}
-						</div>
+						</Select.Content>
+					</Select.Root>
+					<p class="text-xs text-muted-foreground mt-1">
+						Apply this filter globally or to a specific category only
+					</p>
+				</div>
 
-						<!-- Info Box -->
-						<div class="rounded-md bg-muted p-3 text-xs text-muted-foreground space-y-2">
-							<p><strong>How it works:</strong></p>
-							<ul class="list-disc list-inside space-y-1 ml-2">
-								<li><strong>New articles:</strong> Automatically filtered when they arrive (if AI enabled)</li>
-								<li><strong>Existing articles:</strong> Click "Reprocess" to filter them (costs API calls)</li>
-								<li>Be specific about topics you're interested in for better results</li>
-								<li>Keep prompts under 500 characters</li>
-							</ul>
-						</div>
+				<!-- Auto-Star Switch -->
+				<div class="flex items-center justify-between rounded-lg border p-4">
+					<div class="space-y-0.5">
+						<label class="text-sm font-medium cursor-pointer">
+							Automatically star matching articles
+						</label>
+						<p class="text-xs text-muted-foreground">
+							Articles that match this filter will be automatically starred
+						</p>
 					</div>
-				</Tabs.Content>
+					<Switch.Switch
+						checked={filterForm.auto_star}
+						onCheckedChange={(checked) => filterForm.auto_star = checked}
+					/>
+				</div>
 
-				<!-- Timezone Tab -->
-				<Tabs.Content value="timezone" class="mt-4 min-h-[400px]">
-					<div class="space-y-4 p-4">
-						<div>
-							<h4 class="text-sm font-medium mb-2">Select Your Timezone</h4>
-							<p class="text-sm text-muted-foreground mb-4">
-								Choose your preferred timezone for displaying article timestamps.
-							</p>
-						</div>
-
-						<div class="space-y-2">
-							<label class="text-sm font-medium">Timezone</label>
-							<Select.Root type="single" bind:value={selectedTimezone}>
-								<Select.Trigger class="w-full">
-									{selectedTimezone === 'Asia/Kolkata' ? 'IST (Asia/Kolkata)' : 'UTC'}
-								</Select.Trigger>
-								<Select.Content>
-									<Select.Item value="Asia/Kolkata" onclick={() => updateTimezone('Asia/Kolkata')}>
-										IST (Asia/Kolkata)
-									</Select.Item>
-									<Select.Item value="UTC" onclick={() => updateTimezone('UTC')}>
-										UTC
-									</Select.Item>
-								</Select.Content>
-							</Select.Root>
-						</div>
-
-						<div class="rounded-md bg-muted p-3 text-sm text-muted-foreground">
-							<p><strong>Note:</strong> Changing the timezone will update how article timestamps are displayed throughout the application.</p>
-						</div>
+				<!-- Auto-Notify Switch -->
+				<div class="flex items-center justify-between rounded-lg border p-4">
+					<div class="space-y-0.5">
+						<label class="text-sm font-medium cursor-pointer">
+							Send ntfy notification with full content
+						</label>
+						<p class="text-xs text-muted-foreground">
+							Get notified with the complete article content when a match is found
+						</p>
 					</div>
-				</Tabs.Content>
+					<Switch.Switch
+						checked={filterForm.auto_notify}
+						onCheckedChange={(checked) => filterForm.auto_notify = checked}
+					/>
+				</div>
 
-				<!-- Backup & Export Tab -->
-				<Tabs.Content value="backup" class="mt-4 min-h-[400px]">
-					<div class="space-y-6 p-4">
-						<!-- Database Backups Section -->
-						<div class="space-y-4">
-							<div class="flex items-center justify-between">
-								<div>
-									<h4 class="text-sm font-semibold flex items-center gap-2">
-										<Database class="h-4 w-4" />
-										Database Backups
-									</h4>
-									<p class="text-xs text-muted-foreground mt-1">
-										Create and manage full database backups for disaster recovery
-									</p>
-								</div>
-								<Button
-									onclick={createBackup}
-									disabled={isCreatingBackup}
-									size="sm"
-									class="gap-2"
-								>
-									{#if isCreatingBackup}
-										<Loader2 class="h-4 w-4 animate-spin" />
-										Creating...
-									{:else}
-										<Plus class="h-4 w-4" />
-										Create Backup
-									{/if}
-								</Button>
-							</div>
-
-							{#if activeTab === 'backup'}
-								{#if !backups.length && !isLoadingBackups}
-									<div class="rounded-md border border-dashed p-8 text-center">
-										<Database class="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
-										<p class="text-sm text-muted-foreground">No backups available</p>
-										<p class="text-xs text-muted-foreground mt-1">Create your first backup to get started</p>
-									</div>
-								{:else}
-									<div class="space-y-2 max-h-[200px] overflow-y-auto">
-										{#each backups as backup}
-											<div class="flex items-center justify-between rounded-md border p-3 bg-background">
-												<div class="flex-1 min-w-0">
-													<p class="text-sm font-medium truncate">{backup.filename}</p>
-													<p class="text-xs text-muted-foreground">
-														{new Date(backup.created_at).toLocaleString()} • {backup.size_mb} MB
-													</p>
-												</div>
-												<div class="flex items-center gap-1 ml-2">
-													<Button
-														variant="ghost"
-														size="icon"
-														class="h-8 w-8"
-														onclick={() => downloadBackup(backup.filename)}
-													>
-														<Download class="h-4 w-4" />
-													</Button>
-													<Button
-														variant="ghost"
-														size="icon"
-														class="h-8 w-8"
-														onclick={() => restoreBackup(backup.filename)}
-														disabled={isRestoringBackup}
-													>
-														<Upload class="h-4 w-4" />
-													</Button>
-													<Button
-														variant="ghost"
-														size="icon"
-														class="h-8 w-8 text-destructive"
-														onclick={() => deleteBackup(backup.filename)}
-													>
-														<Trash class="h-4 w-4" />
-													</Button>
-												</div>
-											</div>
-										{/each}
-									</div>
-								{/if}
-							{/if}
-						</div>
-
-						<!-- Data Export Section -->
-						<div class="space-y-4 pt-4 border-t">
-							<div>
-								<h4 class="text-sm font-semibold flex items-center gap-2">
-									<FileDown class="h-4 w-4" />
-									Export Articles
-								</h4>
-								<p class="text-xs text-muted-foreground mt-1">
-									Download your articles in portable formats
-								</p>
-							</div>
-							<div class="flex gap-2">
-								<Button
-									variant="outline"
-									size="sm"
-									onclick={() => exportArticles('csv')}
-									class="gap-2"
-								>
-									<FileDown class="h-4 w-4" />
-									Export as CSV
-								</Button>
-								<Button
-									variant="outline"
-									size="sm"
-									onclick={() => exportArticles('json')}
-									class="gap-2"
-								>
-									<FileDown class="h-4 w-4" />
-									Export as JSON
-								</Button>
-							</div>
-						</div>
-
-						<!-- OPML Import/Export Section -->
-						<div class="space-y-4 pt-4 border-t">
-							<div>
-								<h4 class="text-sm font-semibold flex items-center gap-2">
-									<FileText class="h-4 w-4" />
-									OPML Feed Migration
-								</h4>
-								<p class="text-xs text-muted-foreground mt-1">
-									Import or export your feed subscriptions
-								</p>
-							</div>
-							<div class="flex gap-2">
-								<Button
-									variant="outline"
-									size="sm"
-									onclick={exportOPML}
-									class="gap-2"
-								>
-									<FileDown class="h-4 w-4" />
-									Export OPML
-								</Button>
-								<label class="cursor-pointer">
-									<input
-										type="file"
-										accept=".opml,.xml"
-										onchange={importOPML}
-										class="hidden"
-									/>
-									<Button
-										variant="outline"
-										size="sm"
-										class="gap-2"
-										onclick={(e) => {
-											e.preventDefault();
-											(e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement)?.click();
-										}}
-									>
-										<FileUp class="h-4 w-4" />
-										Import OPML
-									</Button>
-								</label>
-							</div>
-							<div class="rounded-md bg-muted p-3 text-xs text-muted-foreground">
-								<p><strong>Note:</strong> Categorized feeds will be imported into matching categories. Uncategorized feeds will be placed in a "Feeds" category. Duplicate feeds will be skipped.</p>
-							</div>
-						</div>
+				<!-- Enabled Switch -->
+				<div class="flex items-center justify-between rounded-lg border p-4">
+					<div class="space-y-0.5">
+						<label class="text-sm font-medium cursor-pointer">
+							Enable this filter
+						</label>
+						<p class="text-xs text-muted-foreground">
+							Activate or deactivate this filter without deleting it
+						</p>
 					</div>
-				</Tabs.Content>
-			</Tabs.Root>
-
-			<div class="mt-6 flex justify-end">
-				<Button variant="outline" onclick={closeCategorySettings}>Close</Button>
-			</div>
-		</div>
-	</div>
-{/if}
+					<Switch.Switch
+						checked={filterForm.enabled}
+						onCheckedChange={(checked) => filterForm.enabled = checked}
+					/>
+				</div>
+    </div>
+    <div class="mt-6 flex justify-end gap-2">
+      <Button variant="outline" onclick={() => showFilterDialog = false}>Cancel</Button>
+      <Button onclick={saveFilter}>{editingFilter ? 'Update Filter' : 'Create Filter'}</Button>
+    </div>
+  </Dialog.Content>
+</Dialog.Root>

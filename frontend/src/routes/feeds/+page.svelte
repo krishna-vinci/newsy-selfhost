@@ -1,7 +1,7 @@
 <script lang="ts">
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
-import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles } from '@lucide/svelte';
+import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles, ChevronUp, ChevronDown, HelpCircle } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
 import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import Button from '$lib/components/ui/button/index.svelte';
@@ -12,6 +12,7 @@ import Card from '$lib/components/ui/card/index.svelte';
 import Input from '$lib/components/ui/input/index.svelte';
 import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 import FeedSidebar from '$lib/components/FeedSidebar.svelte';
+import KeyboardShortcutsDialog from '$lib/components/KeyboardShortcutsDialog.svelte';
 
 	let { data }: { data: PageData } = $props();
 
@@ -60,6 +61,18 @@ let isLoadingMore = $state<boolean>(false);
 let totalArticles = $state<number>(0);
 const INITIAL_LOAD = 100;
 const LOAD_MORE_SIZE = 50;
+
+// Summarization state
+let showSummaryModal = $state(false);
+let summaryArticle = $state<FeedItem | null>(null);
+let summaryText = $state<string>('');
+let isLoadingSummary = $state(false);
+
+// UI state
+let showShortcutsModal = $state(false);
+
+// Search input reference for keyboard shortcuts
+let searchInputRef: HTMLInputElement | null = null;
 
 // Helper function to merge articles with read statuses
 function mergeWithReadStatus(articles: FeedItem[]): FeedItem[] {
@@ -368,54 +381,189 @@ async function markAsRead(links: string[]) {
 	}
 }
 
-// Keyboard navigation for column view
+// Navigate to next article in column view
+function navigateNext() {
+	if (viewMode !== 'column' || filteredArticles.length === 0) return;
+
+	// Mark current article as read
+	if (filteredArticles[selectedColumnIndex]) {
+		markAsRead([filteredArticles[selectedColumnIndex].link]);
+	}
+
+	const isLastArticle = selectedColumnIndex >= filteredArticles.length - 1;
+
+	// When hideReadArticles is enabled, the current article is removed,
+	// and the next article takes its place at the same index.
+	if (hideReadArticles) {
+		if (isLastArticle) {
+			selectedColumnIndex = 0; // Loop to top
+		}
+		// Otherwise, stay at the same index.
+	} else {
+		// Normal navigation: move to the next article or loop
+		selectedColumnIndex = isLastArticle ? 0 : selectedColumnIndex + 1;
+	}
+
+	// Load the article at the new index
+	setTimeout(() => {
+		if (filteredArticles[selectedColumnIndex]) {
+			loadArticleContent(filteredArticles[selectedColumnIndex].link);
+		}
+	}, 50);
+}
+
+// Navigate to previous article in column view
+function navigatePrevious() {
+	if (viewMode !== 'column' || filteredArticles.length === 0) return;
+
+	// Mark current article as read
+	if (filteredArticles[selectedColumnIndex]) {
+		markAsRead([filteredArticles[selectedColumnIndex].link]);
+	}
+
+	const isFirstArticle = selectedColumnIndex === 0;
+
+	// Move to the previous article or loop to the end
+	selectedColumnIndex = isFirstArticle ? filteredArticles.length - 1 : selectedColumnIndex - 1;
+
+	// Load the article at the new index
+	setTimeout(() => {
+		if (filteredArticles[selectedColumnIndex]) {
+			loadArticleContent(filteredArticles[selectedColumnIndex].link);
+		}
+	}, 50);
+}
+
+// Enhanced keyboard shortcuts for all essential functions
 function handleKeydown(event: KeyboardEvent) {
-		if (viewMode !== 'column' || filteredArticles.length === 0) return;
-		
-		if (event.key === 'ArrowDown') {
+	// Don't trigger shortcuts when typing in input fields
+	const target = event.target as HTMLElement;
+	if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+		// Allow Escape to blur input fields
+		if (event.key === 'Escape') {
+			target.blur();
+		}
+		return;
+	}
+	
+	// Column view navigation (Arrow keys)
+	if (viewMode === 'column' && filteredArticles.length > 0) {
+		if (event.key === 'ArrowDown' || event.key === 'j') {
 			event.preventDefault();
-			// Mark current article as read
-			if (filteredArticles[selectedColumnIndex]) {
-				markAsRead([filteredArticles[selectedColumnIndex].link]);
-			}
-			
-			// When hideReadArticles is enabled, marking the current article as read removes it
-			// So the next article is now at the current index, not index + 1
-			if (hideReadArticles) {
-				// Stay at the same index (which now points to the next article)
-				// But ensure we don't go past the end
-				selectedColumnIndex = Math.min(selectedColumnIndex, filteredArticles.length - 2);
-			} else {
-				// Normal navigation: move to next article
-				selectedColumnIndex = Math.min(selectedColumnIndex + 1, filteredArticles.length - 1);
-			}
-			
-			// Load the article at the new index (wait a bit for state to update)
-			setTimeout(() => {
-				if (filteredArticles[selectedColumnIndex]) {
-					loadArticleContent(filteredArticles[selectedColumnIndex].link);
-				}
-			}, 50);
-		} else if (event.key === 'ArrowUp') {
+			navigateNext();
+			return;
+		} else if (event.key === 'ArrowUp' || event.key === 'k') {
 			event.preventDefault();
-			// Mark current article as read
-			if (filteredArticles[selectedColumnIndex]) {
-				markAsRead([filteredArticles[selectedColumnIndex].link]);
-			}
-			
-			// Move to previous article
-			// When hideReadArticles is enabled, we need to move back 1 position
-			// because the current article will be removed
-			selectedColumnIndex = Math.max(selectedColumnIndex - 1, 0);
-			
-			// Load the article at the new index
-			setTimeout(() => {
-				if (filteredArticles[selectedColumnIndex]) {
-					loadArticleContent(filteredArticles[selectedColumnIndex].link);
-				}
-			}, 50);
+			navigatePrevious();
+			return;
 		}
 	}
+	
+	// Global shortcuts
+	switch (event.key) {
+		case '/':
+			// Focus search input
+			event.preventDefault();
+			searchInputRef?.focus();
+			break;
+			
+		case 's':
+			// Star current article
+			event.preventDefault();
+			if (viewMode === 'column' && filteredArticles[selectedColumnIndex]) {
+				toggleArticleStar(filteredArticles[selectedColumnIndex]);
+			}
+			break;
+			
+		case 'o':
+			// Open current article in new tab
+			event.preventDefault();
+			if (viewMode === 'column' && filteredArticles[selectedColumnIndex]) {
+				window.open(filteredArticles[selectedColumnIndex].link, '_blank', 'noopener,noreferrer');
+			}
+			break;
+			
+		case 'r':
+			// Mark current article as read
+			event.preventDefault();
+			if (viewMode === 'column' && filteredArticles[selectedColumnIndex]) {
+				markAsRead([filteredArticles[selectedColumnIndex].link]);
+			}
+			break;
+			
+		case '1':
+			// Switch to card view
+			event.preventDefault();
+			viewMode = 'card';
+			break;
+			
+		case '2':
+			// Switch to headline view
+			event.preventDefault();
+			viewMode = 'headline';
+			break;
+			
+		case '3':
+			// Switch to column view
+			event.preventDefault();
+			viewMode = 'column';
+			break;
+			
+		case 'a':
+			// Toggle AI filter view
+			event.preventDefault();
+			toggleViewType();
+			break;
+			
+		case 'f':
+			// Toggle starred/favorites view
+			event.preventDefault();
+			toggleStarredView();
+			break;
+			
+		case 'h':
+			// Toggle hide read articles
+			event.preventDefault();
+			toggleHideReadArticles();
+			break;
+			
+		case '?':
+			// Show keyboard shortcuts help
+			event.preventDefault();
+			showShortcutsModal = !showShortcutsModal;
+			break;
+	}
+}
+
+// Summarize article using AI
+async function summarizeArticle(article: FeedItem) {
+	summaryArticle = article;
+	summaryText = '';
+	showSummaryModal = true;
+	isLoadingSummary = true;
+	
+	try {
+		const response = await fetch('/api/article/summarize', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ link: article.link })
+		});
+		
+		if (!response.ok) {
+			const error = await response.json();
+			throw new Error(error.error || 'Failed to generate summary');
+		}
+		
+		const result = await response.json();
+		summaryText = result.summary;
+	} catch (error) {
+		console.error('Error generating summary:', error);
+		toast.error(error instanceof Error ? error.message : 'Failed to generate summary');
+		showSummaryModal = false;
+	} finally {
+		isLoadingSummary = false;
+	}
+}
 
 // Generate starred report for current category
 async function generateStarredReport() {
@@ -474,6 +622,19 @@ $effect(() => {
 			loadArticleContent(filteredArticles[0].link);
 		}
 		// Otherwise, keep the current index (article may have changed but index stays same)
+	}
+});
+
+// Scroll selected article into view in column mode
+$effect(() => {
+	if (viewMode === 'column' && filteredArticles.length > 0) {
+		const el = document.getElementById(`article-column-${selectedColumnIndex}`);
+		if (el) {
+			el.scrollIntoView({
+				behavior: 'smooth',
+				block: 'nearest'
+			});
+		}
 	}
 });
 
@@ -568,6 +729,7 @@ $effect(() => {
 					oninput={handleSearchInput}
 					class="pl-9 pr-9"
 					disabled={isSearching}
+					bind:ref={searchInputRef}
 				/>
 				{#if searchQuery}
 					<button
@@ -620,17 +782,24 @@ $effect(() => {
 				{/if}
 			</Button>
 
-			<!-- AI View Toggle -->
-			<Button
-				variant={viewType === 'ai' ? 'default' : 'outline'}
-				size="icon"
-				onclick={toggleViewType}
-				aria-label={viewType === 'ai' ? 'Switch to standard view' : 'Switch to AI filtered view'}
-				title={viewType === 'ai' ? 'AI Filtered View' : 'Standard View'}
-				class={viewType === 'ai' ? 'bg-purple-500 hover:bg-purple-600' : ''}
-			>
-				<Sparkles class="size-4" />
-			</Button>
+			<!-- AI View Toggle with Count -->
+			<div class="flex items-center gap-2">
+				<Button
+					variant={viewType === 'ai' ? 'default' : 'outline'}
+					size="icon"
+					onclick={toggleViewType}
+					aria-label={viewType === 'ai' ? 'Switch to standard view' : 'Switch to AI filtered view'}
+					title={viewType === 'ai' ? 'AI Filtered View' : 'Standard View'}
+					class={viewType === 'ai' ? 'bg-purple-500 hover:bg-purple-600' : ''}
+				>
+					<Sparkles class="size-4" />
+				</Button>
+				{#if viewType === 'ai' && totalArticles > 0}
+					<Badge variant="secondary" class="text-xs font-mono">
+						{filteredArticles.length}/{totalArticles}
+					</Badge>
+				{/if}
+			</div>
 
 			<!-- View Mode Toggle -->
 			<div class="flex gap-2">
@@ -659,6 +828,7 @@ $effect(() => {
 					<Columns2 class="size-4" />
 				</Button>
 			</div>
+
 		</div>
 	</div>
 	<Separator />
@@ -722,13 +892,23 @@ $effect(() => {
 									size="icon-sm"
 									onclick={(e) => toggleArticleStar(article, e)}
 									class={article.starred ? 'text-yellow-500 hover:text-yellow-600' : ''}
+									title="Star article"
 								>
 									<Star class="size-4" fill={article.starred ? 'currentColor' : 'none'} />
 								</Button>
 								<Button
 									variant="outline"
 									size="icon-sm"
+									onclick={() => summarizeArticle(article)}
+									title="Summarize with AI"
+								>
+									<Sparkles class="size-4" />
+								</Button>
+								<Button
+									variant="outline"
+									size="icon-sm"
 									onclick={() => openArticleModal(article)}
+									title="Read article"
 								>
 									<Eye class="size-4" />
 								</Button>
@@ -738,6 +918,7 @@ $effect(() => {
 									href={article.link}
 									target="_blank"
 									rel="noopener noreferrer"
+									title="Open in new tab"
 								>
 									<ExternalLink class="size-4" />
 								</Button>
@@ -787,13 +968,23 @@ $effect(() => {
 								size="icon-sm"
 								onclick={(e) => toggleArticleStar(article, e)}
 								class={article.starred ? 'text-yellow-500 hover:text-yellow-600' : ''}
+								title="Star article"
 							>
 								<Star class="size-4" fill={article.starred ? 'currentColor' : 'none'} />
 							</Button>
 							<Button
 								variant="ghost"
 								size="icon-sm"
+								onclick={() => summarizeArticle(article)}
+								title="Summarize with AI"
+							>
+								<Sparkles class="size-4" />
+							</Button>
+							<Button
+								variant="ghost"
+								size="icon-sm"
 								onclick={() => openArticleModal(article)}
+								title="Read article"
 							>
 								<Eye class="size-4" />
 							</Button>
@@ -803,6 +994,7 @@ $effect(() => {
 								href={article.link}
 								target="_blank"
 								rel="noopener noreferrer"
+								title="Open in new tab"
 							>
 								<ExternalLink class="size-4" />
 							</Button>
@@ -838,6 +1030,7 @@ $effect(() => {
 			<div class="flex flex-col gap-2">
 				{#each filteredArticles as article, index}
 					<Card
+						id={`article-column-${index}`}
 						class="group cursor-pointer transition-all {selectedColumnIndex === index ? 'ring-2 ring-primary' : 'hover:shadow-md'} {article.is_read ? 'opacity-60' : ''}"
 						onclick={() => {
 							// Mark previous article as read when switching
@@ -932,13 +1125,23 @@ $effect(() => {
 										size="icon-sm"
 										onclick={(e) => toggleArticleStar(filteredArticles[selectedColumnIndex], e)}
 										class={filteredArticles[selectedColumnIndex].starred ? 'text-yellow-500 hover:text-yellow-600' : ''}
+										title="Star article"
 									>
 										<Star class="size-4" fill={filteredArticles[selectedColumnIndex].starred ? 'currentColor' : 'none'} />
 									</Button>
 									<Button
 										variant="outline"
 										size="icon-sm"
+										onclick={() => summarizeArticle(filteredArticles[selectedColumnIndex])}
+										title="Summarize with AI"
+									>
+										<Sparkles class="size-4" />
+									</Button>
+									<Button
+										variant="outline"
+										size="icon-sm"
 										onclick={() => copyToClipboard(filteredArticles[selectedColumnIndex].link, 'Link copied to clipboard!')}
+										title="Copy link"
 									>
 										<Copy class="size-4" />
 									</Button>
@@ -948,6 +1151,7 @@ $effect(() => {
 										href={filteredArticles[selectedColumnIndex].link}
 										target="_blank"
 										rel="noopener noreferrer"
+										title="Open in new tab"
 									>
 										<ExternalLink class="size-4" />
 									</Button>
@@ -957,9 +1161,41 @@ $effect(() => {
 							<div class="prose prose-sm max-w-none dark:prose-invert">
 								{@html articleContent}
 							</div>
+							
 						</div>
 					{/if}
 				</Card>
+
+				<!-- Navigation Controls -->
+				{#if filteredArticles.length > 0}
+					<div class="mt-4 flex items-center justify-between rounded-lg border bg-card p-4 text-card-foreground shadow-sm">
+						<div class="text-sm text-muted-foreground">
+							Article {selectedColumnIndex + 1} of {filteredArticles.length}
+						</div>
+						<div class="flex gap-2">
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={navigatePrevious}
+								disabled={filteredArticles.length === 0}
+								title="Previous article (↑ or k)"
+							>
+								<ChevronUp class="size-4 mr-1" />
+								Previous
+							</Button>
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={navigateNext}
+								disabled={filteredArticles.length === 0}
+								title="Next article (↓ or j)"
+							>
+								Next
+								<ChevronDown class="size-4 ml-1" />
+							</Button>
+						</div>
+					</div>
+				{/if}
 			</div>
 		</div>
 	{/if}
@@ -1004,6 +1240,81 @@ $effect(() => {
 			{:else}
 				<div class="prose prose-sm max-w-none dark:prose-invert max-h-[60vh] overflow-auto">
 					{@html articleContent}
+				</div>
+			{/if}
+		</div>
+	</Dialog>
+{/if}
+
+<!-- Keyboard Shortcuts Modal -->
+<KeyboardShortcutsDialog bind:open={showShortcutsModal} />
+
+<!-- Floating Help Button -->
+<div class="fixed bottom-8 right-8 z-50">
+	<Button
+		variant="outline"
+		size="icon"
+		class="rounded-full shadow-lg"
+		onclick={() => showShortcutsModal = true}
+		aria-label="Show keyboard shortcuts"
+	>
+		<HelpCircle class="size-5" />
+	</Button>
+</div>
+
+<!-- Summary Modal -->
+{#if summaryArticle}
+	<Dialog bind:open={showSummaryModal} title="AI Summary">
+		<div class="flex flex-col gap-4">
+			<div class="flex flex-col gap-2">
+				<h3 class="font-semibold text-lg">{summaryArticle.title}</h3>
+				<div class="flex items-center gap-2">
+					<Badge variant="secondary">{summaryArticle.source}</Badge>
+					<span class="text-xs text-muted-foreground">{summaryArticle.published}</span>
+				</div>
+			</div>
+			
+			<Separator />
+			
+			{#if isLoadingSummary}
+				<div class="flex flex-col items-center justify-center py-8 gap-3">
+					<div class="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent"></div>
+					<p class="text-sm text-muted-foreground">Generating summary with AI...</p>
+				</div>
+			{:else if summaryText}
+				<div class="space-y-3">
+					<div class="flex items-center gap-2 text-sm text-muted-foreground">
+						<Sparkles class="h-4 w-4" />
+						<span>AI-generated summary</span>
+					</div>
+					<div class="rounded-lg bg-muted p-4 text-sm leading-relaxed">
+						{summaryText}
+					</div>
+				</div>
+				
+				<div class="flex justify-end gap-2 pt-2">
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={() => {
+							if (summaryArticle) {
+								openArticleModal(summaryArticle);
+							}
+						}}
+					>
+						<FileText class="h-4 w-4 mr-2" />
+						Read Full Article
+					</Button>
+					<Button
+						variant="outline"
+						size="sm"
+						href={summaryArticle.link}
+						target="_blank"
+						rel="noopener noreferrer"
+					>
+						<ExternalLink class="h-4 w-4 mr-2" />
+						Open Original
+					</Button>
 				</div>
 			{/if}
 		</div>
