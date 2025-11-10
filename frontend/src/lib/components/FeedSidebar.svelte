@@ -1139,33 +1139,123 @@ $effect(() => {
         </Tabs.Content>
         <Tabs.Content value="backup" class="mt-4 min-h-[400px]">
           <div class="space-y-6 p-4">
+            <!-- Database Backups Section -->
             <div class="space-y-4">
               <div class="flex items-center justify-between">
                 <div>
-                  <h4 class="text-sm font-semibold flex items-center gap-2"><Database class="h-4 w-4" />Database Backups</h4>
-                  <p class="text-xs text-muted-foreground mt-1">Create and manage full database backups</p>
+                  <h4 class="text-sm font-semibold flex items-center gap-2">
+                    <Database class="h-4 w-4" />
+                    Database Backups
+                  </h4>
+                  <p class="text-xs text-muted-foreground mt-1">
+                    Create and manage full database backups for disaster recovery
+                  </p>
                 </div>
-                <Button onclick={createBackup} disabled={isCreatingBackup} size="sm" class="gap-2">{#if isCreatingBackup}<Loader2 class="h-4 w-4 animate-spin" />Creating...{:else}<Plus class="h-4 w-4" />Create Backup{/if}</Button>
+                <Button onclick={createBackup} disabled={isCreatingBackup} size="sm" class="gap-2">
+                  {#if isCreatingBackup}
+                    <Loader2 class="h-4 w-4 animate-spin" />
+                    Creating...
+                  {:else}
+                    <Plus class="h-4 w-4" />
+                    Create Backup
+                  {/if}
+                </Button>
+              </div>
+
+              {#if activeTab === 'backup'}
+                {#if !backups.length && !isLoadingBackups}
+                  <div class="rounded-md border border-dashed p-8 text-center">
+                    <Database class="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+                    <p class="text-sm text-muted-foreground">No backups available</p>
+                    <p class="text-xs text-muted-foreground mt-1">Create your first backup to get started</p>
+                  </div>
+                {:else}
+                  <div class="space-y-2 max-h-[200px] overflow-y-auto">
+                    {#each backups as backup}
+                      <div class="flex items-center justify-between rounded-md border p-3 bg-background">
+                        <div class="flex-1 min-w-0">
+                          <p class="text-sm font-medium truncate">{backup.filename}</p>
+                          <p class="text-xs text-muted-foreground">
+                            {new Date(backup.created_at).toLocaleString()} • {backup.size_mb} MB
+                          </p>
+                        </div>
+                        <div class="flex items-center gap-1 ml-2">
+                          <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => downloadBackup(backup.filename)}>
+                            <Download class="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => restoreBackup(backup.filename)} disabled={isRestoringBackup}>
+                            <Upload class="h-4 w-4" />
+                          </Button>
+                          <Button variant="ghost" size="icon" class="h-8 w-8 text-destructive" onclick={() => deleteBackup(backup.filename)}>
+                            <Trash class="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              {/if}
+            </div>
+
+            <!-- Data Export Section -->
+            <div class="space-y-4 pt-4 border-t">
+              <div>
+                <h4 class="text-sm font-semibold flex items-center gap-2">
+                  <FileDown class="h-4 w-4" />
+                  Export Articles
+                </h4>
+                <p class="text-xs text-muted-foreground mt-1">
+                  Download your articles in portable formats
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <Button variant="outline" size="sm" onclick={() => exportArticles('csv')} class="gap-2">
+                  <FileDown class="h-4 w-4" />
+                  Export as CSV
+                </Button>
+                <Button variant="outline" size="sm" onclick={() => exportArticles('json')} class="gap-2">
+                  <FileDown class="h-4 w-4" />
+                  Export as JSON
+                </Button>
               </div>
             </div>
-            {#if activeTab === 'backup'}
-              {#if !backups.length && !isLoadingBackups}
-                <div class="rounded-md border border-dashed p-8 text-center"><Database class="h-8 w-8 mx-auto mb-2 text-muted-foreground" /><p class="text-sm text-muted-foreground">No backups available</p><p class="text-xs text-muted-foreground mt-1">Create your first backup to get started</p></div>
-              {:else}
-                <div class="space-y-2 max-h-[200px] overflow-y-auto">
-                  {#each backups as backup}
-                    <div class="flex items-center justify-between rounded-md border p-3 bg-background">
-                      <div class="flex-1 min-w-0"><p class="text-sm font-medium truncate">{backup.filename}</p><p class="text-xs text-muted-foreground">{new Date(backup.created_at).toLocaleString()} • {backup.size_mb} MB</p></div>
-                      <div class="flex items-center gap-1 ml-2">
-                        <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => downloadBackup(backup.filename)}><Download class="h-4 w-4" /></Button>
-                        <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => restoreBackup(backup.filename)} disabled={isRestoringBackup}><Upload class="h-4 w-4" /></Button>
-                        <Button variant="ghost" size="icon" class="h-8 w-8 text-destructive" onclick={() => deleteBackup(backup.filename)}><Trash class="h-4 w-4" /></Button>
-                      </div>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            {/if}
+
+            <!-- OPML Import/Export Section -->
+            <div class="space-y-4 pt-4 border-t">
+              <div>
+                <h4 class="text-sm font-semibold flex items-center gap-2">
+                  <FileText class="h-4 w-4" />
+                  OPML Feed Migration
+                </h4>
+                <p class="text-xs text-muted-foreground mt-1">
+                  Import or export your feed subscriptions
+                </p>
+              </div>
+              <div class="flex gap-2">
+                <Button variant="outline" size="sm" onclick={exportOPML} class="gap-2">
+                  <FileDown class="h-4 w-4" />
+                  Export OPML
+                </Button>
+                <label class="cursor-pointer">
+                  <input type="file" accept=".opml,.xml" onchange={importOPML} class="hidden" />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="gap-2"
+                    onclick={(e) => {
+                      e.preventDefault();
+                      (e.currentTarget.parentElement?.querySelector('input') as HTMLInputElement)?.click();
+                    }}
+                  >
+                    <FileUp class="h-4 w-4" />
+                    Import OPML
+                  </Button>
+                </label>
+              </div>
+              <div class="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+                <p><strong>Note:</strong> Categorized feeds will be imported into matching categories. Uncategorized feeds will be placed in a "Feeds" category. Duplicate feeds will be skipped.</p>
+              </div>
+            </div>
           </div>
         </Tabs.Content>
       </Tabs.Root>

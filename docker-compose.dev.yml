@@ -1,5 +1,5 @@
 services:
-  frontend:
+  newsy-frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -8,12 +8,13 @@ services:
       - "8324:8324"
     environment:
       - NODE_ENV=development
-      - API_BASE_URL=http://fastapi:8321
+      - API_BASE_URL=http://newsy-backend:8321
     restart: unless-stopped
     networks:
       - db-net
+      - caddy-net
     depends_on:
-      - fastapi
+      - newsy-backend
     develop:
       watch:
         - action: sync
@@ -22,7 +23,7 @@ services:
           ignore:
             - node_modules/
 
-  fastapi:
+  newsy-backend:
     build:
       context: .
       dockerfile: dockerfile
@@ -45,9 +46,10 @@ services:
     restart: unless-stopped
     networks:
       - db-net
+      - caddy-net
     depends_on:
       - newsy_db
-      - redis
+      - newsy-redis
 
   newsy_db:
     image: postgres:alpine
@@ -61,7 +63,7 @@ services:
       - db-net
     restart: unless-stopped
 
-  redis:
+  newsy-redis:
     image: redis:7-alpine
     command: redis-server --appendonly yes
     volumes:
@@ -78,4 +80,6 @@ volumes:
 
 networks:
   db-net:
+    external: true
+  caddy-net:
     external: true
