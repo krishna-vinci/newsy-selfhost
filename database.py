@@ -162,6 +162,67 @@ async def init_db():
         """)
         logger.info("Article AI matches indexes created")
         
+        # Article filters table (for keyword/topic-based filtering)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS article_filters (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                category_id INTEGER REFERENCES categories(id) ON DELETE CASCADE,
+                filter_type TEXT NOT NULL CHECK (filter_type IN ('keyword', 'topic')),
+                filter_value TEXT NOT NULL,
+                auto_star BOOLEAN DEFAULT true,
+                auto_notify BOOLEAN DEFAULT true,
+                enabled BOOLEAN DEFAULT true,
+                created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        logger.info("Article filters table initialized")
+        
+        # Create indexes for article_filters
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_article_filters_category 
+            ON article_filters(category_id);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_article_filters_enabled 
+            ON article_filters(enabled);
+        """)
+        logger.info("Article filters indexes created")
+        
+        # Article filter matches table (tracks which filters matched which articles)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS article_filter_matches (
+                id SERIAL PRIMARY KEY,
+                article_id INTEGER NOT NULL REFERENCES articles(id) ON DELETE CASCADE,
+                filter_id INTEGER NOT NULL REFERENCES article_filters(id) ON DELETE CASCADE,
+                matched_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(article_id, filter_id)
+            );
+        """)
+        logger.info("Article filter matches table initialized")
+        
+        # Create indexes for article_filter_matches
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_article_filter_matches_article 
+            ON article_filter_matches(article_id);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_article_filter_matches_filter 
+            ON article_filter_matches(filter_id);
+        """)
+        logger.info("Article filter matches indexes created")
+        
+        # Add auto_starred_by column to articles if it doesn't exist
+        try:
+            await conn.execute("""
+                ALTER TABLE articles 
+                ADD COLUMN IF NOT EXISTS auto_starred_by INTEGER REFERENCES article_filters(id) ON DELETE SET NULL;
+            """)
+            logger.info("Added auto_starred_by column to articles table")
+        except Exception as e:
+            logger.debug(f"auto_starred_by column might already exist: {e}")
+        
         # Initialize default timezone setting if not exists
         timezone_exists = await conn.fetchval(
             "SELECT COUNT(*) FROM user_settings WHERE key = 'timezone'"

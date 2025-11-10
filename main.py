@@ -58,6 +58,7 @@ import reports  # Import reports module
 import backup_restore  # Import backup/restore/export module
 import database  # Import database module
 import ai_filter  # Import AI filtering module
+import keyword_filter  # Import keyword/topic filtering module
 
 load_dotenv()  # Load environment variables
 
@@ -408,6 +409,15 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 await ai_filter.process_new_article(article_id, category, conn)
             except Exception as e:
                 logging.warning(f"AI filter processing failed for article {article_id}: {e}")
+            
+            # Process with keyword/topic filters (auto-star and notify if matched)
+            try:
+                await keyword_filter.process_article_filters(
+                    article_id, title, link, description, article_content, 
+                    category, source_name, conn
+                )
+            except Exception as e:
+                logging.warning(f"Keyword filter processing failed for article {article_id}: {e}")
 
             await send_ntfy_notification(title, link, description, category, source_name)
 
@@ -1587,3 +1597,282 @@ async def trends(source: str = "reddit"):
         response_data["nitter_url"] = Config.NITTER_URL
 
     return JSONResponse(content=response_data)
+
+
+# ===================== Keyword/Topic Filter Endpoints =====================
+
+@app.get("/api/filters")
+async def get_filters(category_id: int = None):
+    """Get all filters, optionally filtered by category."""
+    try:
+        conn = await get_db_connection()
+        
+        if category_id:
+            filters = await conn.fetch("""
+                SELECT f.id, f.name, f.category_id, c.name as category_name,
+                       f.filter_type, f.filter_value, f.auto_star, f.auto_notify, 
+                       f.enabled, f.created_at
+                FROM article_filters f
+                LEFT JOIN categories c ON f.category_id = c.id
+                WHERE f.category_id = $1 OR f.category_id IS NULL
+                ORDER BY f.created_at DESC
+            """, category_id)
+        else:
+            filters = await conn.fetch("""
+                SELECT f.id, f.name, f.category_id, c.name as category_name,
+                       f.filter_type, f.filter_value, f.auto_star, f.auto_notify, 
+                       f.enabled, f.created_at
+                FROM article_filters f
+                LEFT JOIN categories c ON f.category_id = c.id
+                ORDER BY f.created_at DESC
+            """)
+        
+        await conn.close()
+        
+        # Convert datetime objects to ISO strings for JSON serialization
+        filters_list = []
+        for f in filters:
+            filter_dict = dict(f)
+            if filter_dict.get('created_at'):
+                filter_dict['created_at'] = filter_dict['created_at'].isoformat()
+            if filter_dict.get('updated_at'):
+                filter_dict['updated_at'] = filter_dict['updated_at'].isoformat()
+            filters_list.append(filter_dict)
+        
+        return JSONResponse(content=filters_list)
+    except Exception as e:
+        logging.error(f"Error getting filters: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/filters")
+async def create_filter(request: Request):
+    """Create a new keyword or topic filter."""
+    try:
+        body = await request.json()
+        name = body.get("name", "").strip()
+        category_id = body.get("category_id")  # Can be null for global filters
+        filter_type = body.get("filter_type", "keyword")
+        filter_value = body.get("filter_value", "").strip()
+        auto_star = body.get("auto_star", True)
+        auto_notify = body.get("auto_notify", True)
+        enabled = body.get("enabled", True)
+        
+        if not name or not filter_value:
+            return JSONResponse({"error": "Name and filter value are required"}, status_code=400)
+        
+        if filter_type not in ['keyword', 'topic']:
+            return JSONResponse({"error": "Filter type must be 'keyword' or 'topic'"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        # If category_id is provided, verify it exists
+        if category_id:
+            category_exists = await conn.fetchval("SELECT id FROM categories WHERE id = $1", category_id)
+            if not category_exists:
+                await conn.close()
+                return JSONResponse({"error": "Category not found"}, status_code=404)
+        
+        # Insert filter
+        filter_id = await conn.fetchval("""
+            INSERT INTO article_filters 
+            (name, category_id, filter_type, filter_value, auto_star, auto_notify, enabled)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id
+        """, name, category_id, filter_type, filter_value, auto_star, auto_notify, enabled)
+        
+        await conn.close()
+        
+        return JSONResponse(content={
+            "message": "Filter created successfully",
+            "filter_id": filter_id
+        })
+    except Exception as e:
+        logging.error(f"Error creating filter: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/filters/{filter_id}")
+async def update_filter(filter_id: int, request: Request):
+    """Update an existing filter."""
+    try:
+        body = await request.json()
+        name = body.get("name", "").strip()
+        filter_value = body.get("filter_value", "").strip()
+        auto_star = body.get("auto_star", True)
+        auto_notify = body.get("auto_notify", True)
+        enabled = body.get("enabled", True)
+        
+        if not name or not filter_value:
+            return JSONResponse({"error": "Name and filter value are required"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        result = await conn.execute("""
+            UPDATE article_filters 
+            SET name = $1, filter_value = $2, auto_star = $3, auto_notify = $4, 
+                enabled = $5, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $6
+        """, name, filter_value, auto_star, auto_notify, enabled, filter_id)
+        
+        await conn.close()
+        
+        if result == 'UPDATE 0':
+            return JSONResponse({"error": "Filter not found"}, status_code=404)
+        
+        return JSONResponse(content={"message": "Filter updated successfully"})
+    except Exception as e:
+        logging.error(f"Error updating filter: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/filters/{filter_id}")
+async def delete_filter(filter_id: int):
+    """Delete a filter."""
+    try:
+        conn = await get_db_connection()
+        
+        result = await conn.execute("DELETE FROM article_filters WHERE id = $1", filter_id)
+        
+        await conn.close()
+        
+        if result == 'DELETE 0':
+            return JSONResponse({"error": "Filter not found"}, status_code=404)
+        
+        return JSONResponse(content={"message": "Filter deleted successfully"})
+    except Exception as e:
+        logging.error(f"Error deleting filter: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/filters/{filter_id}/statistics")
+async def get_filter_statistics_endpoint(filter_id: int, days: int = 30):
+    """Get statistics for a specific filter."""
+    try:
+        conn = await get_db_connection()
+        
+        from datetime import datetime, timedelta
+        threshold = datetime.now(IST) - timedelta(days=days)
+        
+        stats = await conn.fetchrow("""
+            SELECT 
+                f.id,
+                f.name,
+                f.filter_type,
+                f.filter_value,
+                COUNT(DISTINCT afm.article_id) as total_matches,
+                COUNT(DISTINCT CASE WHEN a.starred = true THEN afm.article_id END) as starred_matches
+            FROM article_filters f
+            LEFT JOIN article_filter_matches afm ON f.id = afm.filter_id AND afm.matched_at >= $1
+            LEFT JOIN articles a ON afm.article_id = a.id
+            WHERE f.id = $2
+            GROUP BY f.id, f.name, f.filter_type, f.filter_value
+        """, threshold, filter_id)
+        
+        await conn.close()
+        
+        if not stats:
+            return JSONResponse({"error": "Filter not found"}, status_code=404)
+        
+        return JSONResponse(content=dict(stats))
+    except Exception as e:
+        logging.error(f"Error getting filter statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/filters/statistics/all")
+async def get_all_filters_statistics(category_id: int = None, days: int = 30):
+    """Get statistics for all filters."""
+    try:
+        conn = await get_db_connection()
+        stats = await keyword_filter.get_filter_statistics(conn, category_id, days)
+        await conn.close()
+        
+        return JSONResponse(content=stats)
+    except Exception as e:
+        logging.error(f"Error getting all filter statistics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===================== Article Summarization Endpoint =====================
+
+@app.post("/api/article/summarize")
+async def summarize_article(request: Request):
+    """Generate an AI summary of an article."""
+    try:
+        body = await request.json()
+        article_link = body.get("link", "").strip()
+        
+        if not article_link:
+            return JSONResponse({"error": "Article link is required"}, status_code=400)
+        
+        # Get article content from database
+        conn = await get_db_connection()
+        article = await conn.fetchrow("""
+            SELECT title, description, content FROM articles WHERE link = $1
+        """, article_link)
+        await conn.close()
+        
+        if not article:
+            return JSONResponse({"error": "Article not found"}, status_code=404)
+        
+        title = article['title'] or ""
+        description = article['description'] or ""
+        content = article['content'] or ""
+        
+        # Use AI to generate summary
+        try:
+            from openai import AsyncOpenAI
+            
+            client = AsyncOpenAI(
+                api_key=Config.OPENAI_API_KEY,
+                base_url=Config.OPENAI_BASE_URL
+            )
+            
+            # Prepare content for summarization
+            # Use content if available, otherwise use description
+            text_to_summarize = content if content else description
+            
+            # Strip HTML tags for cleaner summarization
+            import re
+            clean_text = re.sub('<[^<]+?>', '', text_to_summarize)
+            clean_text = clean_text[:3000]  # Limit to avoid token limits
+            
+            system_message = """You are a helpful assistant that creates concise, informative summaries of news articles. 
+Your summaries should:
+- Capture the key points and main ideas
+- Be 3-5 sentences long
+- Be clear and easy to understand
+- Focus on facts and important details"""
+            
+            user_message = f"""Please summarize this article:
+
+Title: {title}
+
+Content: {clean_text}"""
+            
+            response = await client.chat.completions.create(
+                model=Config.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": user_message}
+                ],
+                max_tokens=200,
+                temperature=0.5
+            )
+            
+            summary = response.choices[0].message.content.strip()
+            
+            return JSONResponse(content={
+                "success": True,
+                "summary": summary,
+                "title": title
+            })
+            
+        except Exception as e:
+            logging.error(f"Error generating summary: {e}")
+            return JSONResponse({"error": "Failed to generate summary"}, status_code=500)
+    
+    except Exception as e:
+        logging.error(f"Error in summarize_article: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

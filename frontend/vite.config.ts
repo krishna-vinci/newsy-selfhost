@@ -7,11 +7,11 @@ export default defineConfig({
 	server: {
 		proxy: {
 			'/api': {
-				target: 'http://localhost:8321',
+				target: 'http://fastapi:8321',
 				changeOrigin: true
 			},
 			'/article-full-text': {
-				target: 'http://localhost:8321',
+				target: 'http://fastapi:8321',
 				changeOrigin: true
 			}
 		}
