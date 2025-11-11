@@ -12,6 +12,7 @@ import * as Switch from '$lib/components/ui/switch/index.ts';
 import * as Tabs from '$lib/components/ui/tabs/index.js';
 import * as Dialog from '$lib/components/ui/dialog/index.ts';
 import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash, CheckCircle, Star } from '@lucide/svelte';
+import SocialIcons from '@rodneylab/svelte-social-icons';
 import { dndzone } from 'svelte-dnd-action';
 import { settings } from '$lib/stores/settings';
 
@@ -31,6 +32,8 @@ type Category = {
 	priority: number;
 	is_default: boolean;
 	ntfy_enabled: boolean;
+	telegram_enabled: boolean;
+	telegram_chat_id: string | null;
 	ai_prompt: string | null;
 	ai_enabled: boolean;
 };
@@ -372,6 +375,32 @@ async function toggleCategoryNtfy(category: Category) {
 	} catch (error) {
 		category.ntfy_enabled = previousEnabled;
 		toast.error('Failed to update ntfy setting');
+	}
+}
+
+async function updateCategoryTelegram(category: Category, enabled: boolean, chatId: string | null) {
+	const previousEnabled = category.telegram_enabled;
+	const previousChatId = category.telegram_chat_id;
+	
+	category.telegram_enabled = enabled;
+	category.telegram_chat_id = chatId;
+	
+	try {
+		const response = await fetch(`/api/category/${category.id}/telegram`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				telegram_enabled: enabled,
+				telegram_chat_id: chatId
+			})
+		});
+		
+		if (!response.ok) throw new Error('Failed to update telegram settings');
+		toast.success(enabled ? 'Telegram notifications enabled' : 'Telegram notifications disabled');
+	} catch (error) {
+		category.telegram_enabled = previousEnabled;
+		category.telegram_chat_id = previousChatId;
+		toast.error('Failed to update telegram settings');
 	}
 }
 
@@ -991,11 +1020,80 @@ $effect(() => {
                       </Button>
                     </div>
                   </div>
-                  <div class="flex items-center gap-3 flex-shrink-0">
+                  <div class="flex items-center gap-3 flex-shrink-0 flex-wrap">
                     <div class="flex items-center gap-2">
                       <Bell class="h-4 w-4 text-muted-foreground" />
                       <Switch.Switch checked={category.ntfy_enabled} onCheckedChange={() => toggleCategoryNtfy(category)} />
                       <span class="text-xs text-muted-foreground min-w-[24px]">{category.ntfy_enabled ? 'On' : 'Off'}</span>
+                    </div>
+									<div class="flex items-center gap-2">
+										<SocialIcons network="telegram" alt="" fgColor="#888888" bgColor="transparent" width="24" height="24" />
+										<Dialog.Root>
+											<Dialog.Trigger>
+												<Switch.Switch 
+                            checked={category.telegram_enabled}
+                            onCheckedChange={() => {
+                              if (category.telegram_enabled) {
+                                updateCategoryTelegram(category, false, category.telegram_chat_id);
+                              } else if (category.telegram_chat_id) {
+                                updateCategoryTelegram(category, true, category.telegram_chat_id);
+                              }
+                            }}
+                          />
+                        </Dialog.Trigger>
+                        <Dialog.Content class="sm:max-w-md">
+                          <Dialog.Header>
+                            <Dialog.Title>Telegram Notifications - {category.name}</Dialog.Title>
+                            <Dialog.Description>
+                              Configure Telegram notifications for this category.
+                            </Dialog.Description>
+                          </Dialog.Header>
+                          <div class="space-y-4">
+                            <div class="flex items-center gap-2">
+                              <Switch.Switch 
+                                checked={category.telegram_enabled} 
+                                onCheckedChange={(checked) => {
+                                  updateCategoryTelegram(category, checked, category.telegram_chat_id);
+                                }} 
+                              />
+                              <span class="text-sm font-medium">Enable Telegram Notifications</span>
+                            </div>
+                            <div>
+                              <label for="telegram-chat-id" class="text-sm font-medium">Chat ID</label>
+                              <Input 
+                                id="telegram-chat-id" 
+                                type="text" 
+                                placeholder="Enter your Telegram Chat ID" 
+                                value={category.telegram_chat_id || ''}
+                                oninput={(e) => {
+                                  const chatId = e.currentTarget.value.trim() || null;
+                                  category.telegram_chat_id = chatId;
+                                }}
+                                onblur={() => {
+                                  if (category.telegram_enabled && category.telegram_chat_id) {
+                                    updateCategoryTelegram(category, true, category.telegram_chat_id);
+                                  }
+                                }}
+                                class="mt-1"
+                              />
+                              <p class="text-xs text-muted-foreground mt-1">Get your Chat ID from @userinfobot on Telegram</p>
+                            </div>
+                            <Button 
+                              onclick={() => {
+                                if (category.telegram_chat_id) {
+                                  updateCategoryTelegram(category, true, category.telegram_chat_id);
+                                } else {
+                                  toast.error('Please enter a Chat ID');
+                                }
+                              }}
+                              class="w-full"
+                            >
+                              Save Settings
+                            </Button>
+                          </div>
+                        </Dialog.Content>
+                      </Dialog.Root>
+                      <span class="text-xs text-muted-foreground min-w-[24px]">{category.telegram_enabled ? 'On' : 'Off'}</span>
                     </div>
                     <Button variant={category.is_default ? 'secondary' : 'ghost'} size="sm" class="text-xs whitespace-nowrap" onclick={() => setDefaultCategory(category.id)}>
                       {category.is_default ? 'Default' : 'Set Default'}
