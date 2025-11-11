@@ -511,7 +511,22 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
         logging.exception("Error parsing/storing feed for URL: %s | Error: %s", rss_url, e)
 
 
+async def fetch_single_feed(feed_id: int, name: str, url: str, category: str):
+    """Fetch a single feed by its ID"""
+    start_time = datetime.now(IST)
+    logging.info("Feed update started for '%s' at %s", name, start_time)
+    
+    try:
+        await parse_and_store_rss_feed(feed_id, url, category, source_name=name)
+    except Exception as e:
+        logging.error(f"Error fetching feed '{name}': {e}")
+    finally:
+        end_time = datetime.now(IST)
+        logging.info("Feed update completed for '%s' at %s", name, end_time)
+
+
 async def fetch_all_feeds_db():
+    """Fetch all active feeds (used for initial startup)"""
     start_time = datetime.now(IST)
     logging.info("Feed update started at %s", start_time)
     
@@ -532,6 +547,45 @@ async def fetch_all_feeds_db():
         await database.release_db_connection(conn)
         end_time = datetime.now(IST)
         logging.info("Feed update completed at %s", end_time)
+
+
+async def schedule_all_feeds():
+    """Schedule individual jobs for each active feed based on their polling_interval"""
+    conn = await get_db_connection()
+    
+    try:
+        active_feeds = await conn.fetch('SELECT id, name, url, category, polling_interval FROM feeds WHERE "isActive" = true')
+        
+        for feed in active_feeds:
+            feed_id = feed['id']
+            name = feed['name']
+            url = feed['url']
+            category = feed['category']
+            polling_interval = feed['polling_interval'] or 1  # Default to 1 minute if None
+            
+            # Create unique job ID for this feed
+            job_id = f"feed_{feed_id}"
+            
+            # Remove existing job if it exists
+            if scheduler.get_job(job_id):
+                scheduler.remove_job(job_id)
+            
+            # Schedule the feed with its custom interval
+            scheduler.add_job(
+                fetch_single_feed,
+                'interval',
+                minutes=polling_interval,
+                args=[feed_id, name, url, category],
+                id=job_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=300
+            )
+            
+            logging.info(f"Scheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
+    
+    finally:
+        await database.release_db_connection(conn)
 
 
 async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None):
@@ -689,7 +743,7 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
              article = await convert_article_timezone(article, target_tz)
          
          articles.append(article)
-     await conn.close()
+     await database.release_db_connection(conn)
      return articles
 
 
@@ -827,7 +881,9 @@ async def startup_event():
     # Build initial search index
     asyncio.create_task(build_search_index())
     
-    scheduler.add_job(fetch_all_feeds_db, 'interval', minutes=1)
+    # Schedule individual feeds with their custom polling intervals
+    await schedule_all_feeds()
+    
     scheduler.add_job(cleanup_old_articles, 'cron', hour=0)  # Run daily at midnight
     scheduler.add_job(build_search_index, 'interval', minutes=5)  # Update search index every 5 minutes
     scheduler.start()
@@ -1025,7 +1081,7 @@ async def get_feeds_config():
     ordered_categories_rows = await conn.fetch('SELECT name FROM categories ORDER BY priority')
     ordered_categories = [row['name'] for row in ordered_categories_rows]
     
-    all_feeds_rows = await conn.fetch('SELECT id, name, url, category, "isActive", priority, retention_days FROM feeds')
+    all_feeds_rows = await conn.fetch('SELECT id, name, url, category, "isActive", priority, retention_days, polling_interval FROM feeds')
     
     feeds_by_category = {}
     for row in all_feeds_rows:
@@ -1038,7 +1094,8 @@ async def get_feeds_config():
             "url": row['url'],
             "isActive": row['isActive'],
             "priority": row['priority'],
-            "retention_days": row['retention_days']
+            "retention_days": row['retention_days'],
+            "polling_interval": row['polling_interval']
         })
         
     for category in feeds_by_category:
@@ -1049,7 +1106,7 @@ async def get_feeds_config():
         # Include all categories, even if they have no feeds
         feeds_config[category_name] = feeds_by_category.get(category_name, [])
 
-    await conn.close()
+    await database.release_db_connection(conn)
     return JSONResponse(content=feeds_config)
 
 @app.post("/api/feeds/config")
@@ -1321,6 +1378,7 @@ async def add_feed(request: Request):
         category_name = body.get("category", "").strip()
         name = body.get("name", "").strip()
         retention_days = body.get("retention_days") # Can be None
+        polling_interval = body.get("polling_interval", 60) # Default to 60 minutes (1 hour)
         
         if not url or not category_name:
             return JSONResponse({"error": "URL and category are required"}, status_code=400)
@@ -1339,17 +1397,34 @@ async def add_feed(request: Request):
 
             result = await conn.execute(
                 """
-                INSERT INTO feeds (name, url, category, "isActive", priority, retention_days)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO feeds (name, url, category, "isActive", priority, retention_days, polling_interval)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (url) DO NOTHING;
                 """,
-                feed_name, url, category_name, True, max_priority + 1, retention_days
+                feed_name, url, category_name, True, max_priority + 1, retention_days, polling_interval
             )
             if result == 'INSERT 0 0':
                 return JSONResponse({"error": "Feed with this URL already exists"}, status_code=400)
 
             feed_id = await conn.fetchval("SELECT id FROM feeds WHERE url = $1", url)
             await parse_and_store_rss_feed(feed_id, url, category_name, feed_name)
+            
+            # Schedule the new feed
+            job_id = f"feed_{feed_id}"
+            if scheduler.get_job(job_id):
+                scheduler.remove_job(job_id)
+            
+            scheduler.add_job(
+                fetch_single_feed,
+                'interval',
+                minutes=polling_interval,
+                args=[feed_id, feed_name, url, category_name],
+                id=job_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=300
+            )
+            logging.info(f"Scheduled new feed '{feed_name}' (ID: {feed_id}) with {polling_interval} minute interval")
             
             return JSONResponse({"message": "Feed added successfully", "category": category_name, "url": url})
 
@@ -1414,16 +1489,35 @@ async def update_feed(feed_id: int, request: Request):
         category = body.get("category")
         priority = body.get("priority")
         retention_days = body.get("retention_days") # Can be None
+        polling_interval = body.get("polling_interval", 60) # Default to 60 minutes (1 hour)
 
         if not all([name, url, category]):
             raise HTTPException(status_code=400, detail="Name, URL, and category are required.")
 
         conn = await get_db_connection()
         await conn.execute(
-            'UPDATE feeds SET name = $1, url = $2, category = $3, priority = $4, retention_days = $5 WHERE id = $6',
-            name, url, category, priority, retention_days, feed_id
+            'UPDATE feeds SET name = $1, url = $2, category = $3, priority = $4, retention_days = $5, polling_interval = $6 WHERE id = $7',
+            name, url, category, priority, retention_days, polling_interval, feed_id
         )
         await database.release_db_connection(conn)
+        
+        # Reschedule the feed with new interval
+        job_id = f"feed_{feed_id}"
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+        
+        scheduler.add_job(
+            fetch_single_feed,
+            'interval',
+            minutes=polling_interval,
+            args=[feed_id, name, url, category],
+            id=job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300
+        )
+        logging.info(f"Rescheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
+        
         return JSONResponse({"message": "Feed updated successfully."})
     except Exception as e:
         logging.error(f"Error updating feed: {e}")
@@ -1434,8 +1528,15 @@ async def delete_feed(feed_id: int):
     """Delete a feed."""
     try:
         conn = await get_db_connection()
-        await conn.execute('DELETE FROM feeds WHERE id = $1', (feed_id,))
+        await conn.execute('DELETE FROM feeds WHERE id = $1', feed_id)
         await database.release_db_connection(conn)
+        
+        # Remove the scheduled job for this feed
+        job_id = f"feed_{feed_id}"
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+            logging.info(f"Removed scheduled job for deleted feed ID: {feed_id}")
+        
         return JSONResponse({"message": "Feed deleted successfully."})
     except Exception as e:
         logging.error(f"Error deleting feed: {e}")
@@ -1447,7 +1548,7 @@ async def get_settings():
     conn = await get_db_connection()
     rows = await conn.fetch("SELECT key, value FROM user_settings")
     settings = {row['key']: row['value'] for row in rows}
-    await conn.close()
+    await database.release_db_connection(conn)
     return JSONResponse(content=settings)
 
 @app.put("/api/settings")
@@ -1486,7 +1587,7 @@ async def get_categories():
         "ai_prompt": row['ai_prompt'],
         "ai_enabled": row['ai_enabled']
     } for row in rows]
-    await conn.close()
+    await database.release_db_connection(conn)
     return JSONResponse(content=categories)
 
 @app.put("/api/categories/order")
@@ -1550,6 +1651,48 @@ async def update_category_telegram(category_id: int, request: Request):
         return JSONResponse({"message": f"Telegram notifications {'enabled' if telegram_enabled else 'disabled'} for category."})
     except Exception as e:
         logging.error(f"Error updating category telegram settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/category/{category_id}/name")
+async def update_category_name(category_id: int, request: Request):
+    """Update a category's name."""
+    try:
+        body = await request.json()
+        new_name = body.get("name", "").strip()
+        
+        if not new_name:
+            return JSONResponse({"error": "Category name is required"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        # Get old category name
+        old_name_row = await conn.fetchrow("SELECT name FROM categories WHERE id = $1", category_id)
+        if not old_name_row:
+            await database.release_db_connection(conn)
+            raise HTTPException(status_code=404, detail="Category not found")
+        
+        old_name = old_name_row['name']
+        
+        # Check if new name already exists (for a different category)
+        existing = await conn.fetchval("SELECT id FROM categories WHERE name = $1 AND id != $2", new_name, category_id)
+        if existing:
+            await database.release_db_connection(conn)
+            return JSONResponse({"error": "A category with this name already exists"}, status_code=400)
+        
+        # Update category name
+        await conn.execute("UPDATE categories SET name = $1 WHERE id = $2", new_name, category_id)
+        
+        # Update all feeds and articles with this category
+        await conn.execute("UPDATE feeds SET category = $1 WHERE category = $2", new_name, old_name)
+        await conn.execute("UPDATE articles SET category = $1 WHERE category = $2", new_name, old_name)
+        
+        await database.release_db_connection(conn)
+        
+        return JSONResponse({"message": f"Category renamed from '{old_name}' to '{new_name}'"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error updating category name: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/category/{category_id}")
@@ -1677,7 +1820,7 @@ async def feeds_column(request: Request):
     conn = await get_db_connection()
     categories_rows = await conn.fetch("SELECT name FROM categories ORDER BY priority")
     categories = [row['name'] for row in categories_rows]
-    await conn.close()
+    await database.release_db_connection(conn)
 
     categories_list = []
     for category in categories:
