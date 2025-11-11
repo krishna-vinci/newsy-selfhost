@@ -24,6 +24,7 @@ type Feed = {
 	isActive: boolean;
 	priority: number;
 	retention_days: number | null;
+	polling_interval: number;
 };
 
 type Category = {
@@ -67,6 +68,8 @@ let editingFeedCategory = $state('');
 let showCategorySettingsModal = $state(false);
 let categoriesList = $state<Category[]>([]);
 let activeTab = $state('categories');
+let editingCategoryId = $state<number | null>(null);
+let editingCategoryName = $state('');
 
 // Timezone settings state
 let selectedTimezone = $state('Asia/Kolkata');
@@ -84,6 +87,8 @@ let selectedCategoryForFeed = $state('');
 let newCategoryName = $state('');
 let useExistingCategory = $state(true);
 let newFeedRetentionDays = $state<number | undefined>(undefined);
+let newFeedPollingHours = $state(1);
+let newFeedPollingMinutes = $state(0);
 
 // Keyword/Topic filter state
 let keywordFilters = $state<any[]>([]);
@@ -189,6 +194,7 @@ async function addCustomFeed() {
 	}
 
 	try {
+		const pollingInterval = Math.max(1, newFeedPollingHours * 60 + newFeedPollingMinutes);
 		const response = await fetch('/api/add-feed', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
@@ -196,7 +202,8 @@ async function addCustomFeed() {
 				url: newFeedUrl.trim(),
 				category: category,
 				name: newFeedName.trim(),
-				retention_days: newFeedRetentionDays
+				retention_days: newFeedRetentionDays,
+				polling_interval: pollingInterval
 			})
 		});
 
@@ -221,11 +228,17 @@ function resetAddFeedForm() {
 	useExistingCategory = true;
 	showAddFeedForm = false;
 	newFeedRetentionDays = undefined;
+	newFeedPollingHours = 1;
+	newFeedPollingMinutes = 0;
 }
 
 // Edit/Delete Functions
 function openEditModal(feed: Feed, category: string) {
-	editingFeed = { ...feed };
+	editingFeed = { 
+		...feed,
+		// Only set default if polling_interval is null/undefined, not if it's 0 or any other number
+		polling_interval: feed.polling_interval ?? 60
+	};
 	editingFeedCategory = category;
 	showEditFeedModal = true;
 }
@@ -248,7 +261,8 @@ async function updateFeed() {
 				url: editingFeed.url,
 				category: editingFeedCategory,
 				priority: editingFeed.priority,
-				retention_days: editingFeed.retention_days
+				retention_days: editingFeed.retention_days,
+				polling_interval: editingFeed.polling_interval
 			})
 		});
 
@@ -336,6 +350,32 @@ async function setDefaultCategory(categoryId: number) {
 		await loadCategories(); // Reload categories to show new default
 	} catch (error) {
 		toast.error('Failed to set default category');
+	}
+}
+
+async function updateCategoryName(categoryId: number, newName: string) {
+	if (!newName.trim()) {
+		toast.error('Category name cannot be empty');
+		return;
+	}
+
+	try {
+		const response = await fetch(`/api/category/${categoryId}/name`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ name: newName.trim() })
+		});
+		
+		if (!response.ok) {
+			const error = await response.json();
+			throw new Error(error.error || 'Failed to update category name');
+		}
+		
+		toast.success('Category name updated');
+		await loadCategories();
+		await loadFeedConfig();
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : 'Failed to update category name');
 	}
 }
 
@@ -860,6 +900,26 @@ $effect(() => {
 						bind:value={newFeedRetentionDays}
 						class="h-8 text-sm"
 					/>
+					<div class="space-y-1">
+						<label class="text-xs font-medium">Polling Interval</label>
+						<div class="flex gap-2 items-center">
+							<Input
+								type="number"
+								placeholder="HH"
+								bind:value={newFeedPollingHours}
+								min="0"
+								class="h-8 text-sm flex-1"
+							/>
+							<span class="text-xs">:</span>
+							<Input
+								type="number"
+								placeholder="MM"
+								bind:value={newFeedPollingMinutes}
+								min="1"
+								class="h-8 text-sm flex-1"
+							/>
+						</div>
+					</div>
 
 					<div class="flex gap-2 text-xs">
 						<label class="flex items-center gap-1 cursor-pointer">
@@ -963,6 +1023,41 @@ $effect(() => {
 					/>
 				</div>
 				<div>
+					<label class="mb-1 block text-sm font-medium">Polling Interval</label>
+					<div class="flex gap-2 items-center">
+						<Input
+							type="number"
+							placeholder="HH"
+							value={editingFeed ? Math.floor(editingFeed.polling_interval / 60) : 1}
+							oninput={(e) => {
+								if (editingFeed) {
+									const hours = parseInt(e.currentTarget.value) || 0;
+									const minutes = editingFeed.polling_interval % 60;
+									editingFeed.polling_interval = hours * 60 + minutes;
+								}
+							}}
+							min="0"
+							class="flex-1"
+						/>
+						<span>:</span>
+						<Input
+							type="number"
+							placeholder="MM"
+							value={editingFeed ? editingFeed.polling_interval % 60 : 0}
+							oninput={(e) => {
+								if (editingFeed) {
+									const minutes = parseInt(e.currentTarget.value) || 0;
+									const hours = Math.floor(editingFeed.polling_interval / 60);
+									const totalMinutes = hours * 60 + minutes;
+									editingFeed.polling_interval = Math.max(1, totalMinutes);
+								}
+							}}
+							min="0"
+							class="flex-1"
+						/>
+					</div>
+				</div>
+				<div>
 					<label for="edit-feed-category" class="mb-1 block text-sm font-medium">Category</label>
 					<Select.Root type="single" bind:value={editingFeedCategory}>
 						<Select.Trigger>{editingFeedCategory || 'Select category'}</Select.Trigger>
@@ -1012,7 +1107,49 @@ $effect(() => {
                 <div class="flex items-center gap-3">
                   <GripVertical class="h-5 w-5 cursor-grab text-muted-foreground flex-shrink-0" />
                   <div class="flex-1 min-w-0">
-                    <div class="font-medium text-sm mb-1">{category.name}</div>
+                    {#if editingCategoryId === category.id}
+                      <div class="flex items-center gap-2 mb-1">
+                        <Input
+                          type="text"
+                          bind:value={editingCategoryName}
+                          class="h-7 text-sm flex-1"
+                          placeholder="Category name"
+                        />
+                        <Button 
+                          size="icon" 
+                          class="h-7 w-7" 
+                          onclick={() => {
+                            updateCategoryName(category.id, editingCategoryName);
+                            editingCategoryId = null;
+                          }}
+                        >
+                          <CheckCircle class="h-3 w-3" />
+                        </Button>
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          class="h-7 w-7" 
+                          onclick={() => editingCategoryId = null}
+                        >
+                          ✕
+                        </Button>
+                      </div>
+                    {:else}
+                      <div class="flex items-center gap-2 mb-1">
+                        <div class="font-medium text-sm">{category.name}</div>
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          class="h-5 w-5" 
+                          onclick={() => {
+                            editingCategoryId = category.id;
+                            editingCategoryName = category.name;
+                          }}
+                        >
+                          <Pencil class="h-3 w-3" />
+                        </Button>
+                      </div>
+                    {/if}
                     <div class="flex items-center gap-2">
                       <span class="text-xs text-muted-foreground font-mono bg-muted px-2 py-0.5 rounded">{topicName}</span>
                       <Button variant="ghost" size="icon" class="h-5 w-5" onclick={() => copyToClipboard(topicName, 'Topic copied to clipboard')}>
