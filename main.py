@@ -1832,21 +1832,6 @@ async def feeds_column(request: Request):
 async def home(request: Request):
     return templates.TemplateResponse("home.html", {"request": request})
 
-#######trends###########################################################################################
-
-@app.get("/api/trends")
-async def trends(source: str = "reddit"):
-    feeds = RSS_FEED_URLS.get(source, [])
-    channels = []
-    for feed in feeds:
-        items = await parse_rss_feed(feed["url"], feed["name"])
-        channels.append({"name": feed["name"], "feed_items": items})
-
-    response_data = {"source": source, "channels": channels}
-    if source == "twitter":
-        response_data["nitter_url"] = Config.NITTER_URL
-
-    return JSONResponse(content=response_data)
 
 
 # ===================== Keyword/Topic Filter Endpoints =====================
