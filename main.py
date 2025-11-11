@@ -235,6 +235,91 @@ async def send_ntfy_notification(title: str, link: str, description: str, catego
 # ---- ntfy end ----- #
 
 
+async def send_telegram_notification(title: str, link: str, description: str, category: str, source: str, thumbnail: str = None):
+    """Send notification to Telegram for new articles."""
+    # Check if telegram is enabled for this category and get chat_id
+    try:
+        conn = await get_db_connection()
+        row = await conn.fetchrow(
+            "SELECT telegram_enabled, telegram_chat_id FROM categories WHERE name = $1", 
+            category
+        )
+        await database.release_db_connection(conn)
+        
+        if not row or row['telegram_enabled'] is False:
+            logging.debug(f"Telegram notifications disabled for category: {category}")
+            return
+        
+        chat_id = row['telegram_chat_id']
+        if not chat_id:
+            logging.debug(f"No Telegram chat ID configured for category: {category}")
+            return
+            
+    except Exception as e:
+        logging.warning(f"Could not check telegram status for category {category}: {e}")
+        return
+    
+    # Get bot token from config
+    from config import Config
+    bot_token = Config.TELEGRAM_BOT_TOKEN
+    
+    if not bot_token:
+        logging.warning("TELEGRAM_BOT_TOKEN not configured")
+        return
+    
+    # Format the message with Markdown
+    title = sanitize_text(title)
+    description = sanitize_text(description)
+    
+    # Escape special characters for Telegram MarkdownV2
+    def escape_markdown(text):
+        """Escape special characters for Telegram MarkdownV2."""
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text
+    
+    escaped_title = escape_markdown(title)
+    escaped_description = escape_markdown(description[:300])  # Limit description length
+    escaped_source = escape_markdown(source)
+    escaped_link = link  # URLs don't need escaping in markdown links
+    
+    message = f"*{escaped_title}*\n\n{escaped_description}\n\n_via {escaped_source}_\n\n[Read Full Article]({escaped_link})"
+    
+    # Send the notification
+    telegram_api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "MarkdownV2",
+        "disable_web_page_preview": False
+    }
+    
+    # If thumbnail is available, send as photo with caption instead
+    if thumbnail:
+        telegram_api_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+        payload = {
+            "chat_id": chat_id,
+            "photo": thumbnail,
+            "caption": message,
+            "parse_mode": "MarkdownV2"
+        }
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(telegram_api_url, json=payload)
+            response.raise_for_status()
+            logging.debug(f"Telegram notification sent for article: {title}")
+    except httpx.HTTPStatusError as e:
+        logging.error(f"Failed to send Telegram notification: {e.response.text}")
+    except Exception as e:
+        logging.error(f"Failed to send Telegram notification: {e}")
+
+
+# ---- telegram end ----- #
+
+
 
 
 
@@ -414,6 +499,7 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 logging.warning(f"Keyword filter processing failed for article {article_id}: {e}")
 
             await send_ntfy_notification(title, link, description, category, source_name)
+            await send_telegram_notification(title, link, description, category, source_name, thumbnail_url)
 
         await database.release_db_connection(conn)
 
@@ -1388,13 +1474,15 @@ async def update_settings(request: Request):
 async def get_categories():
     """Get all categories, ordered by priority."""
     conn = await get_db_connection()
-    rows = await conn.fetch("SELECT id, name, priority, is_default, ntfy_enabled, ai_prompt, ai_enabled FROM categories ORDER BY priority")
+    rows = await conn.fetch("SELECT id, name, priority, is_default, ntfy_enabled, telegram_enabled, telegram_chat_id, ai_prompt, ai_enabled FROM categories ORDER BY priority")
     categories = [{
         "id": row['id'], 
         "name": row['name'], 
         "priority": row['priority'], 
         "is_default": row['is_default'], 
         "ntfy_enabled": row['ntfy_enabled'],
+        "telegram_enabled": row['telegram_enabled'],
+        "telegram_chat_id": row['telegram_chat_id'],
         "ai_prompt": row['ai_prompt'],
         "ai_enabled": row['ai_enabled']
     } for row in rows]
@@ -1442,6 +1530,26 @@ async def toggle_category_ntfy(category_id: int, request: Request):
         return JSONResponse({"message": f"Ntfy notifications {'enabled' if ntfy_enabled else 'disabled'} for category."})
     except Exception as e:
         logging.error(f"Error toggling category ntfy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/category/{category_id}/telegram")
+async def update_category_telegram(category_id: int, request: Request):
+    """Update telegram notifications settings for a category."""
+    try:
+        body = await request.json()
+        telegram_enabled = body.get("telegram_enabled", False)
+        telegram_chat_id = body.get("telegram_chat_id", None)
+        
+        conn = await get_db_connection()
+        await conn.execute(
+            "UPDATE categories SET telegram_enabled = $1, telegram_chat_id = $2 WHERE id = $3", 
+            telegram_enabled, telegram_chat_id, category_id
+        )
+        await database.release_db_connection(conn)
+        
+        return JSONResponse({"message": f"Telegram notifications {'enabled' if telegram_enabled else 'disabled'} for category."})
+    except Exception as e:
+        logging.error(f"Error updating category telegram settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/category/{category_id}")
