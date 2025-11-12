@@ -1,7 +1,8 @@
 <script lang="ts">
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
-import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles, ChevronUp, ChevronDown, HelpCircle } from '@lucide/svelte';
+import { onMount, onDestroy } from 'svelte';
+import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles, ChevronUp, ChevronDown, HelpCircle, Bell } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
 import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import Button from '$lib/components/ui/button/index.svelte';
@@ -13,8 +14,34 @@ import Input from '$lib/components/ui/input/index.svelte';
 import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 import FeedSidebar from '$lib/components/FeedSidebar.svelte';
 import KeyboardShortcutsDialog from '$lib/components/KeyboardShortcutsDialog.svelte';
+import { settings } from '$lib/stores/settings.ts';
 
 	let { data }: { data: PageData } = $props();
+
+	let timezone = $state('UTC');
+
+	function formatPublishedDate(dateString: string, tz: string): string {
+		if (!dateString) return '';
+		try {
+			const date = new Date(dateString);
+			return new Intl.DateTimeFormat('en-US', {
+				year: 'numeric',
+				month: 'short',
+				day: 'numeric',
+				hour: 'numeric',
+				minute: '2-digit',
+				timeZone: tz,
+				hour12: true
+			}).format(date);
+		} catch (error) {
+			console.warn(`Invalid timezone '${tz}' or date '${dateString}'. Falling back.`, error);
+			try {
+				return new Date(dateString).toLocaleString();
+			} catch {
+				return dateString;
+			}
+		}
+	}
 
 	type ViewMode = 'card' | 'headline' | 'column';
 	type FeedItem = {
@@ -37,6 +64,8 @@ import KeyboardShortcutsDialog from '$lib/components/KeyboardShortcutsDialog.sve
 // State
 let viewMode = $state<ViewMode>('card');
 let selectedCategory = $state<string>('all');
+let selectedFeedUrl = $state<string | null>(null);
+let selectedFeedName = $state<string | null>(null);
 let modalOpen = $state(false);
 let selectedArticle = $state<FeedItem | null>(null);
 let articleContent = $state<string>('');
@@ -73,6 +102,13 @@ let showShortcutsModal = $state(false);
 
 // Search input reference for keyboard shortcuts
 let searchInputRef: HTMLInputElement | null = null;
+
+// Real-time updates state
+let lastCheckTimestamp = $state<string>(new Date().toISOString());
+let newArticlesCount = $state<number>(0);
+let newArticlesByCategory = $state<Record<string, number>>({});
+let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
+let unsubscribe: () => void;
 
 // Helper function to merge articles with read statuses
 function mergeWithReadStatus(articles: FeedItem[]): FeedItem[] {
@@ -142,6 +178,16 @@ const searchResultCount = $derived(
 
 function handleCategorySelect(category: string) {
 	selectedCategory = category;
+	selectedFeedUrl = null;
+	selectedFeedName = null;
+	// Load initial articles with pagination
+	loadInitialArticles();
+}
+
+function handleFeedSelect(feedUrl: string, feedName: string) {
+	selectedFeedUrl = feedUrl;
+	selectedFeedName = feedName;
+	selectedCategory = 'all'; // Clear category selection when feed is selected
 	// Load initial articles with pagination
 	loadInitialArticles();
 }
@@ -205,12 +251,13 @@ async function loadInitialArticles() {
 	hasMore = true;
 	
 	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
+	const feedParam = selectedFeedUrl ? `&feed_url=${encodeURIComponent(selectedFeedUrl)}` : '';
 	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
 	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
 	const viewParam = `&view=${viewType}`;
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2&limit=${INITIAL_LOAD}&offset=0${categoryParam}${searchParam}${starredParam}${viewParam}`);
+		const response = await fetch(`/api/feeds?days=2&limit=${INITIAL_LOAD}&offset=0${categoryParam}${feedParam}${searchParam}${starredParam}${viewParam}`);
 		if (!response.ok) throw new Error('Failed to fetch feeds');
 		
 		const data = await response.json();
@@ -221,6 +268,12 @@ async function loadInitialArticles() {
 			totalArticles = data.total;
 			hasMore = data.has_more;
 			currentOffset = INITIAL_LOAD;
+			console.log('[LazyLoad] Initial load:', {
+				loaded: data.articles.length,
+				total: data.total,
+				hasMore: data.has_more,
+				currentOffset: INITIAL_LOAD
+			});
 			// Fetch read statuses for loaded articles
 			await fetchReadStatuses(data.articles);
 		} else {
@@ -234,17 +287,22 @@ async function loadInitialArticles() {
 }
 
 async function loadMoreArticles() {
-	if (isLoadingMore || !hasMore) return;
+	console.log('[LazyLoad] loadMoreArticles called. isLoadingMore:', isLoadingMore, 'hasMore:', hasMore);
+	if (isLoadingMore || !hasMore) {
+		console.log('[LazyLoad] Skipping load - already loading or no more articles');
+		return;
+	}
 	
 	isLoadingMore = true;
 	
 	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
+	const feedParam = selectedFeedUrl ? `&feed_url=${encodeURIComponent(selectedFeedUrl)}` : '';
 	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
 	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
 	const viewParam = `&view=${viewType}`;
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2&limit=${LOAD_MORE_SIZE}&offset=${currentOffset}${categoryParam}${searchParam}${starredParam}${viewParam}`);
+		const response = await fetch(`/api/feeds?days=2&limit=${LOAD_MORE_SIZE}&offset=${currentOffset}${categoryParam}${feedParam}${searchParam}${starredParam}${viewParam}`);
 		if (!response.ok) throw new Error('Failed to fetch more articles');
 		
 		const data = await response.json();
@@ -255,6 +313,13 @@ async function loadMoreArticles() {
 			allArticles = [...allArticles, ...data.articles];
 			hasMore = data.has_more;
 			currentOffset += data.articles.length;
+			console.log('[LazyLoad] Loaded more articles:', {
+				newArticles: data.articles.length,
+				totalLoaded: allArticles.length,
+				total: data.total,
+				hasMore: data.has_more,
+				currentOffset: currentOffset
+			});
 		}
 	} catch (error) {
 		console.error('Error loading more articles:', error);
@@ -661,28 +726,147 @@ $effect(() => {
 
 // Intersection Observer for lazy loading
 $effect(() => {
-	const trigger = document.querySelector('.load-more-trigger');
-	if (!trigger) return;
+	// Re-run effect when articles are loaded or pagination state changes
+	// Reference allArticles to make effect reactive to article loading
+	const articlesLoaded = allArticles.length;
+	const shouldLoad = hasMore && !isLoadingMore;
 	
-	const observer = new IntersectionObserver(
-		(entries) => {
-			const entry = entries[0];
-			if (entry.isIntersecting && hasMore && !isLoadingMore) {
-				loadMoreArticles();
-			}
-		},
-		{
-			root: null,
-			rootMargin: '200px', // Start loading 200px before reaching the trigger
-			threshold: 0.1
+	// Skip if no articles loaded yet
+	if (articlesLoaded === 0) {
+		console.log('[LazyLoad] No articles loaded yet, skipping observer setup');
+		return;
+	}
+	
+	let observer: IntersectionObserver | null = null;
+	
+	// Wait a tick for DOM to update after articles are rendered
+	const timeoutId = setTimeout(() => {
+		// Find all load-more triggers and observe only the visible one based on viewMode
+		const triggers = document.querySelectorAll('.load-more-trigger');
+		console.log('[LazyLoad] Setting up observer. Triggers found:', triggers.length, 'hasMore:', hasMore, 'isLoadingMore:', isLoadingMore, 'articlesLoaded:', articlesLoaded);
+		
+		if (triggers.length === 0) {
+			console.log('[LazyLoad] No triggers found, skipping observer setup');
+			return;
 		}
-	);
 	
-	observer.observe(trigger);
+		observer = new IntersectionObserver(
+			(entries) => {
+				console.log('[LazyLoad] Observer triggered with', entries.length, 'entries');
+				entries.forEach((entry) => {
+					console.log('[LazyLoad] Entry:', {
+						isIntersecting: entry.isIntersecting,
+						target: entry.target.className,
+						hasMore,
+						isLoadingMore
+					});
+					// Check current state values, not captured closure
+					if (entry.isIntersecting && hasMore && !isLoadingMore) {
+						console.log('[LazyLoad] Trigger intersected, loading more articles. hasMore:', hasMore, 'isLoadingMore:', isLoadingMore);
+						loadMoreArticles();
+					}
+				});
+			},
+			{
+				root: null,
+				rootMargin: '200px', // Start loading 200px before reaching the trigger
+				threshold: 0.1
+			}
+		);
+		
+		console.log('[LazyLoad] Observing', triggers.length, 'triggers');
+		// Observe all triggers (only the visible one will actually trigger)
+		triggers.forEach(trigger => observer!.observe(trigger));
+	}, 100);
 	
 	return () => {
-		observer.disconnect();
+		clearTimeout(timeoutId);
+		if (observer) {
+			console.log('[LazyLoad] Disconnecting observer');
+			observer.disconnect();
+		}
 	};
+});
+
+// Check for new articles since last timestamp
+async function checkForUpdates() {
+	try {
+		console.log('[Updates] Checking for updates since:', lastCheckTimestamp);
+		const response = await fetch(`/api/articles/updates?since=${encodeURIComponent(lastCheckTimestamp)}`);
+		if (!response.ok) {
+			console.error('[Updates] Response not OK:', response.status);
+			return;
+		}
+		
+		const data = await response.json();
+		console.log('[Updates] Response data:', data);
+		
+		if (data.total > 0) {
+			newArticlesCount = data.total;
+			newArticlesByCategory = data.by_category;
+			
+			// Show toast notification
+			const categoryText = Object.entries(data.by_category)
+				.map(([cat, count]) => `${cat}: ${count}`)
+				.join(', ');
+			
+			console.log('[Updates] New articles found:', data.total);
+			toast.info(`${data.total} new article${data.total > 1 ? 's' : ''} available${categoryText ? ` (${categoryText})` : ''}`, {
+				duration: 5000,
+				action: {
+					label: 'Refresh',
+					onClick: () => refreshToShowNewArticles()
+				}
+			});
+		}
+		
+		// Update timestamp for next check
+		lastCheckTimestamp = data.timestamp;
+		console.log('[Updates] Next check will be since:', lastCheckTimestamp);
+	} catch (error) {
+		console.error('[Updates] Error checking for updates:', error);
+	}
+}
+
+// Refresh page to show new articles
+async function refreshToShowNewArticles() {
+	newArticlesCount = 0;
+	newArticlesByCategory = {};
+	await loadInitialArticles();
+	toast.success('Feed refreshed!');
+}
+
+// Start polling for updates every 30 seconds
+onMount(async () => {
+	// Load settings and set default view mode
+	await settings.load();
+	unsubscribe = settings.subscribe((s) => {
+		timezone = s.timezone;
+		if (s.default_view && viewMode === 'card') {
+			// Only set default view on initial load (when viewMode is still at default 'card')
+			viewMode = s.default_view;
+		}
+	});
+	
+	// Initial timestamp
+	lastCheckTimestamp = new Date().toISOString();
+	console.log('[Updates] Polling started. Initial timestamp:', lastCheckTimestamp);
+	
+	// Poll every 30 seconds
+	updateCheckInterval = setInterval(() => {
+		console.log('[Updates] Polling interval triggered');
+		checkForUpdates();
+	}, 30000);
+});
+
+// Also cleanup on destroy
+onDestroy(() => {
+	if (unsubscribe) {
+		unsubscribe();
+	}
+	if (updateCheckInterval) {
+		clearInterval(updateCheckInterval);
+	}
 });
 </script>
 
@@ -697,7 +881,7 @@ $effect(() => {
 <Sidebar.Provider class="h-full">
 <div class="flex w-full h-full">
 <!-- Sidebar -->
-<FeedSidebar {selectedCategory} onCategorySelect={handleCategorySelect} onconfigchanged={handleConfigChanged} />
+<FeedSidebar {selectedCategory} {selectedFeedUrl} onCategorySelect={handleCategorySelect} onFeedSelect={handleFeedSelect} onconfigchanged={handleConfigChanged} />
 
 <!-- Main Content -->
 <Sidebar.Inset class="h-full">
@@ -709,7 +893,7 @@ $effect(() => {
 		<div class="flex items-center gap-2 min-w-0">
 			<Sidebar.Trigger />
 			<h1 class="text-2xl font-bold truncate">
-				{selectedCategory === 'all' ? 'All Feeds' : selectedCategory}
+				{selectedFeedUrl && selectedFeedName ? selectedFeedName : (selectedCategory === 'all' ? 'All Feeds' : selectedCategory)}
 			</h1>
 			{#if isSearchMode && searchQuery}
 				<Badge variant="outline" class="text-xs shrink-0">
@@ -719,6 +903,19 @@ $effect(() => {
 		</div>
 
 		<div class="flex items-center gap-3 shrink-0">
+			<!-- New Articles Indicator -->
+			{#if newArticlesCount > 0}
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={refreshToShowNewArticles}
+					class="flex items-center gap-2 bg-primary/10 hover:bg-primary/20 border-primary/30"
+				>
+					<Bell class="size-4" />
+					<span class="font-medium">{newArticlesCount} new</span>
+				</Button>
+			{/if}
+			
 			<!-- Search Input -->
 			<div class="relative w-64">
 				<Search class="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -879,7 +1076,7 @@ $effect(() => {
 							<div>
 								<div class="flex items-center gap-2">
 									<Badge variant="secondary">{article.source}</Badge>
-									<span class="text-xs text-muted-foreground">{article.published}</span>
+									<span class="text-xs text-muted-foreground">{formatPublishedDate(article.published_datetime, timezone)}</span>
 								</div>
 								<h3 class="mt-2 line-clamp-2 text-lg leading-tight">{article.title}</h3>
 								{#if article.description}
@@ -959,7 +1156,7 @@ $effect(() => {
 							<div class="flex items-center gap-2 text-xs text-muted-foreground">
 								<span>{article.source}</span>
 								<span>&bull;</span>
-								<span>{article.published}</span>
+								<span>{formatPublishedDate(article.published_datetime, timezone)}</span>
 							</div>
 						</div>
 						<div class="flex shrink-0 gap-2">
@@ -1065,7 +1262,7 @@ $effect(() => {
 							<div class="flex min-w-0 flex-1 flex-col gap-2">
 								<div class="flex items-center gap-2">
 									<Badge variant="secondary">{article.source}</Badge>
-									<span class="text-xs text-muted-foreground">{article.published}</span>
+									<span class="text-xs text-muted-foreground">{formatPublishedDate(article.published_datetime, timezone)}</span>
 								</div>
 								<h3 class="line-clamp-2 text-base leading-snug">{article.title}</h3>
 							</div>
@@ -1116,7 +1313,7 @@ $effect(() => {
 									<h2 class="text-xl font-bold leading-tight">{filteredArticles[selectedColumnIndex].title}</h2>
 									<div class="mt-2 flex items-center gap-2">
 										<Badge variant="secondary">{filteredArticles[selectedColumnIndex].source}</Badge>
-										<span class="text-xs text-muted-foreground">{filteredArticles[selectedColumnIndex].published}</span>
+										<span class="text-xs text-muted-foreground">{formatPublishedDate(filteredArticles[selectedColumnIndex].published_datetime, timezone)}</span>
 									</div>
 								</div>
 								<div class="flex shrink-0 gap-2">
@@ -1211,7 +1408,7 @@ $effect(() => {
 		<div class="flex flex-col gap-4">
 			<div class="flex items-center gap-2">
 				<Badge variant="secondary">{selectedArticle.source}</Badge>
-				<span class="text-xs text-muted-foreground">{selectedArticle.published}</span>
+				<span class="text-xs text-muted-foreground">{formatPublishedDate(selectedArticle.published_datetime, timezone)}</span>
 				<div class="ml-auto flex gap-2">
 					<Button
 						variant="outline"
@@ -1270,7 +1467,7 @@ $effect(() => {
 				<h3 class="font-semibold text-lg">{summaryArticle.title}</h3>
 				<div class="flex items-center gap-2">
 					<Badge variant="secondary">{summaryArticle.source}</Badge>
-					<span class="text-xs text-muted-foreground">{summaryArticle.published}</span>
+					<span class="text-xs text-muted-foreground">{formatPublishedDate(summaryArticle.published_datetime, timezone)}</span>
 				</div>
 			</div>
 			
