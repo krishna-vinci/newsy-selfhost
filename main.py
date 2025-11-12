@@ -477,11 +477,11 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
             # Insert article and get its ID
             article_id = await conn.fetchval(
                 'INSERT INTO articles '
-                '(title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id) '
-                'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) '
+                '(title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) '
+                'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) '
                 'RETURNING id',
                 title, link, description, thumbnail_url,
-                 published_formatted, pub_dt, category, article_content, source_name, feed_id
+                 published_formatted, pub_dt, category, article_content, source_name, feed_id, rss_url
             )
 
             # Process with AI filter if enabled for this category (only for NEW articles)
@@ -592,7 +592,7 @@ async def schedule_all_feeds():
         await database.release_db_connection(conn)
 
 
-async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None):
+async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None, feed_url: str = None):
     """Get total count of articles for pagination"""
     threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
@@ -614,6 +614,10 @@ async def get_total_articles_count(category: str = None, days: int = 2, starred_
             if category:
                 query = query.replace("AND (a.title", "AND a.category = $3 AND (a.title")
                 params.append(category)
+            
+            if feed_url:
+                query += f" AND f.url = ${len(params) + 1}"
+                params.append(feed_url)
                 
             if starred_only:
                 query += " AND a.starred = true"
@@ -631,6 +635,10 @@ async def get_total_articles_count(category: str = None, days: int = 2, starred_
             if category:
                 query += " AND a.category = $2"
                 params.append(category)
+            
+            if feed_url:
+                query += f" AND f.url = ${len(params) + 1}"
+                params.append(feed_url)
                 
             if starred_only:
                 query += " AND a.starred = true"
@@ -751,7 +759,7 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
      return articles
 
 
-async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, limit: int = 100, offset: int = 0, category: str = None, target_tz=None, view: str = "standard"):
+async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, limit: int = 100, offset: int = 0, category: str = None, feed_url: str = None, target_tz=None, view: str = "standard"):
     """Get articles across all categories with pagination"""
     threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
@@ -785,6 +793,10 @@ async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, 
         if category:
             query += " AND a.category = $2"
             params.append(category)
+        
+        if feed_url:
+            query += f" AND f.url = ${len(params) + 1}"
+            params.append(feed_url)
         
         if starred_only:
             query += f" AND a.starred = true"
@@ -1079,7 +1091,7 @@ async def parse_rss_feed(rss_url: str, source_name: str = "Unknown"):
 
 @app.get("/api/feeds/config")
 async def get_feeds_config():
-    """Get the current feed configuration from the database, ordered by priority."""
+    """Get the current feed configuration from the database with unread counts, ordered by priority."""
     # Check cache first
     cache_key = cache.generate_cache_key("feeds_config")
     cached_result = cache.get_from_cache(cache_key)
@@ -1087,6 +1099,9 @@ async def get_feeds_config():
         return cached_result
     
     conn = await get_db_connection()
+    
+    # Get threshold for last 7 days
+    threshold = datetime.now(IST) - timedelta(days=7)
     
     ordered_categories_rows = await conn.fetch('SELECT name FROM categories ORDER BY priority')
     ordered_categories = [row['name'] for row in ordered_categories_rows]
@@ -1096,6 +1111,21 @@ async def get_feeds_config():
     feeds_by_category = {}
     for row in all_feeds_rows:
         category = row['category']
+        feed_id = row['id']
+        
+        # Get unread count for this feed using feed_id (works for all articles)
+        unread_count = await conn.fetchval(
+            '''
+            SELECT COUNT(*) 
+            FROM articles a
+            LEFT JOIN user_article_status uas ON a.link = uas.article_link
+            WHERE a.feed_id = $1
+            AND a.published_datetime > $2
+            AND (uas.is_read IS NULL OR uas.is_read = false)
+            ''',
+            feed_id, threshold
+        )
+        
         if category not in feeds_by_category:
             feeds_by_category[category] = []
         feeds_by_category[category].append({
@@ -1105,8 +1135,11 @@ async def get_feeds_config():
             "isActive": row['isActive'],
             "priority": row['priority'],
             "retention_days": row['retention_days'],
-            "polling_interval": row['polling_interval']
+            "polling_interval": row['polling_interval'],
+            "unread_count": unread_count
         })
+        
+        logging.info(f"[Feeds] {row['name']}: unread={unread_count}")
         
     for category in feeds_by_category:
         feeds_by_category[category].sort(key=lambda x: x['priority'])
@@ -1164,6 +1197,7 @@ async def feeds(
     days: int = Query(2, description="Number of days back to fetch articles for.", ge=1, le=30),
     q: str = Query(None, description="Search query for articles"),
     category: str = Query(None, description="Category filter for search"),
+    feed_url: str = Query(None, description="Feed URL to filter by specific feed"),
     starred_only: bool = Query(False, description="Filter to show only starred articles"),
     limit: int = Query(None, description="Number of articles to return (for pagination)", ge=1, le=500),
     offset: int = Query(None, description="Number of articles to skip (for pagination)", ge=0),
@@ -1185,7 +1219,8 @@ async def feeds(
         "feeds", 
         days=days, 
         q=q, 
-        category=category, 
+        category=category,
+        feed_url=feed_url,
         starred_only=starred_only, 
         limit=limit, 
         offset=offset, 
@@ -1209,6 +1244,7 @@ async def feeds(
             limit=limit,
             offset=offset,
             category=category,
+            feed_url=feed_url,
             target_tz=user_tz,
             view=view
         )
@@ -1228,7 +1264,8 @@ async def feeds(
                 category=category,
                 days=days,
                 starred_only=starred_only,
-                search_query=q
+                search_query=q,
+                feed_url=feed_url
             )
         
         result = JSONResponse(content={
@@ -1357,6 +1394,7 @@ async def get_articles_updates(since: str = Query(..., description="ISO 8601 tim
     try:
         # Parse the timestamp
         since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
+        logging.info(f"[Updates] Checking for articles since: {since_dt}")
         
         conn = await get_db_connection()
         
@@ -1366,6 +1404,8 @@ async def get_articles_updates(since: str = Query(..., description="ISO 8601 tim
                 'SELECT COUNT(*) FROM articles WHERE published_datetime > $1',
                 since_dt
             )
+            
+            logging.info(f"[Updates] Found {total_count} new articles")
             
             # Get count by category
             category_rows = await conn.fetch(
@@ -1381,11 +1421,15 @@ async def get_articles_updates(since: str = Query(..., description="ISO 8601 tim
             
             by_category = {row['category']: row['count'] for row in category_rows}
             
-            return JSONResponse(content={
+            response_data = {
                 "total": total_count,
                 "by_category": by_category,
                 "timestamp": datetime.now(pytz.utc).isoformat()
-            })
+            }
+            
+            logging.debug(f"[Updates] Response: {response_data}")
+            
+            return JSONResponse(content=response_data)
             
         finally:
             await database.release_db_connection(conn)
@@ -1469,6 +1513,74 @@ async def mark_articles_as_read(request: Request):
     
     except Exception as e:
         logging.exception("Error marking articles as read: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.post("/api/feed/mark-all-read")
+async def mark_feed_articles_as_read(request: Request):
+    """Mark all unread articles from a specific feed as read."""
+    try:
+        body = await request.json()
+        feed_url = body.get("feed_url", "").strip()
+        
+        if not feed_url:
+            return JSONResponse({"message": "Feed URL is required"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Get feed_id from URL
+            feed_id = await conn.fetchval("SELECT id FROM feeds WHERE url = $1", feed_url)
+            if not feed_id:
+                return JSONResponse({"message": "Feed not found"}, status_code=404)
+            
+            # Get threshold for last 7 days
+            threshold = datetime.now(IST) - timedelta(days=7)
+            
+            # Get all article links from this feed that are unread (using feed_id)
+            articles = await conn.fetch(
+                '''
+                SELECT a.link 
+                FROM articles a
+                LEFT JOIN user_article_status uas ON a.link = uas.article_link
+                WHERE a.feed_id = $1 
+                AND a.published_datetime > $2
+                AND (uas.is_read IS NULL OR uas.is_read = false)
+                ''',
+                feed_id, threshold
+            )
+            
+            # Mark all as read
+            count = 0
+            for article in articles:
+                await conn.execute(
+                    '''
+                    INSERT INTO user_article_status (article_link, is_read, read_at)
+                    VALUES ($1, true, CURRENT_TIMESTAMP)
+                    ON CONFLICT (article_link) 
+                    DO UPDATE SET is_read = true, read_at = CURRENT_TIMESTAMP
+                    ''',
+                    article['link']
+                )
+                count += 1
+            
+            # Invalidate cache
+            cache.invalidate_feeds_cache()
+            
+            logging.info(f"[MarkAllRead] Marked {count} articles as read for feed: {feed_url}")
+            
+            return JSONResponse({
+                "message": f"Marked {count} article(s) as read",
+                "count": count
+            })
+        
+        except asyncpg.PostgresError as e:
+            logging.exception("Database error marking feed articles as read: %s", str(e))
+            return JSONResponse({"error": "Database error"}, status_code=500)
+        finally:
+            await database.release_db_connection(conn)
+    
+    except Exception as e:
+        logging.exception("Error marking feed articles as read: %s", str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/add-feed")
@@ -1685,7 +1797,7 @@ async def update_settings(request: Request):
 
 @app.get("/api/categories")
 async def get_categories():
-    """Get all categories, ordered by priority."""
+    """Get all categories with article counts, ordered by priority."""
     # Check cache first
     cache_key = cache.generate_cache_key("categories")
     cached_result = cache.get_from_cache(cache_key)
@@ -1694,17 +1806,49 @@ async def get_categories():
     
     conn = await get_db_connection()
     rows = await conn.fetch("SELECT id, name, priority, is_default, ntfy_enabled, telegram_enabled, telegram_chat_id, ai_prompt, ai_enabled FROM categories ORDER BY priority")
-    categories = [{
-        "id": row['id'], 
-        "name": row['name'], 
-        "priority": row['priority'], 
-        "is_default": row['is_default'], 
-        "ntfy_enabled": row['ntfy_enabled'],
-        "telegram_enabled": row['telegram_enabled'],
-        "telegram_chat_id": row['telegram_chat_id'],
-        "ai_prompt": row['ai_prompt'],
-        "ai_enabled": row['ai_enabled']
-    } for row in rows]
+    
+    # Get article counts for each category (last 7 days)
+    threshold = datetime.now(IST) - timedelta(days=7)
+    
+    categories = []
+    for row in rows:
+        category_name = row['name']
+        
+        # Get total articles count
+        total_count = await conn.fetchval(
+            'SELECT COUNT(*) FROM articles WHERE category = $1 AND published_datetime > $2',
+            category_name, threshold
+        )
+        
+        # Get unread articles count (articles not in user_article_status or is_read = false)
+        unread_count = await conn.fetchval(
+            '''
+            SELECT COUNT(*) 
+            FROM articles a
+            LEFT JOIN user_article_status uas ON a.link = uas.article_link
+            WHERE a.category = $1 
+            AND a.published_datetime > $2
+            AND (uas.is_read IS NULL OR uas.is_read = false)
+            ''',
+            category_name, threshold
+        )
+        
+        categories.append({
+            "id": row['id'], 
+            "name": row['name'], 
+            "priority": row['priority'], 
+            "is_default": row['is_default'], 
+            "ntfy_enabled": row['ntfy_enabled'],
+            "telegram_enabled": row['telegram_enabled'],
+            "telegram_chat_id": row['telegram_chat_id'],
+            "ai_prompt": row['ai_prompt'],
+            "ai_enabled": row['ai_enabled'],
+            "unread_count": unread_count,
+            "total_count": total_count
+        })
+        
+        logging.info(f"[Categories] {category_name}: unread={unread_count}, total={total_count}")
+    
     await database.release_db_connection(conn)
     
     result = JSONResponse(content=categories)

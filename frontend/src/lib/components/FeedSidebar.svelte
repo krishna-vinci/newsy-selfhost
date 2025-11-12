@@ -11,7 +11,7 @@ import * as Select from '$lib/components/ui/select/index.js';
 import * as Switch from '$lib/components/ui/switch/index.ts';
 import * as Tabs from '$lib/components/ui/tabs/index.js';
 import * as Dialog from '$lib/components/ui/dialog/index.ts';
-import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash, CheckCircle, Star } from '@lucide/svelte';
+import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash, CheckCircle, Star, Check } from '@lucide/svelte';
 import SocialIcons from '@rodneylab/svelte-social-icons';
 import { dndzone } from 'svelte-dnd-action';
 import { settings } from '$lib/stores/settings';
@@ -25,6 +25,7 @@ type Feed = {
 	priority: number;
 	retention_days: number | null;
 	polling_interval: number;
+	unread_count?: number;
 };
 
 type Category = {
@@ -37,6 +38,8 @@ type Category = {
 	telegram_chat_id: string | null;
 	ai_prompt: string | null;
 	ai_enabled: boolean;
+	unread_count?: number;
+	total_count?: number;
 };
 
 type FeedConfig = Record<string, Feed[]>;
@@ -44,12 +47,16 @@ type FeedConfig = Record<string, Feed[]>;
 // Props
 let {
 onCategorySelect = () => {},
+onFeedSelect = () => {},
 onconfigchanged = () => {},
-selectedCategory = 'all'
+selectedCategory = 'all',
+selectedFeedUrl = null
 }: {
 onCategorySelect?: (category: string) => void;
+onFeedSelect?: (feedUrl: string, feedName: string) => void;
 onconfigchanged?: () => void;
 selectedCategory?: string;
+selectedFeedUrl?: string | null;
 } = $props();
 
 // State
@@ -73,6 +80,9 @@ let editingCategoryName = $state('');
 
 // Timezone settings state
 let selectedTimezone = $state('Asia/Kolkata');
+
+// Preferences state
+let selectedDefaultView = $state<'card' | 'headline' | 'column'>('card');
 
 // Backup & Export state
 let backups = $state<any[]>([]);
@@ -135,6 +145,8 @@ async function loadCategories() {
 			throw new Error('Failed to load categories');
 		}
 		categoriesList = await response.json();
+		console.log('[Categories] Loaded categories:', categoriesList);
+		console.log('[Categories] Sample category:', categoriesList[0]);
 	} catch (error) {
 		toast.error('Failed to load categories');
 		console.error('Error loading categories:', error);
@@ -297,12 +309,43 @@ async function deleteFeed(feedId: number) {
 		}
 
 		toast.success('Feed deleted successfully');
+		closeEditModal(); // Close the edit modal
 		await loadFeedConfig(); // Reload to see changes
 	} catch (error) {
 		toast.error('Failed to delete feed');
 		console.error('Error deleting feed:', error);
 	} finally {
 		isSaving = false;
+	}
+}
+
+async function markAllFeedAsRead(feedUrl: string, feedName: string, event: Event) {
+	event.stopPropagation(); // Prevent triggering feed selection
+	
+	if (!confirm(`Mark all articles from "${feedName}" as read?`)) {
+		return;
+	}
+
+	try {
+		const response = await fetch('/api/feed/mark-all-read', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ feed_url: feedUrl })
+		});
+
+		if (!response.ok) {
+			throw new Error('Failed to mark articles as read');
+		}
+
+		const result = await response.json();
+		toast.success(`Marked ${result.count} articles as read`);
+		
+		// Reload feed config to update counts
+		await loadFeedConfig();
+		await loadCategories();
+	} catch (error) {
+		toast.error('Failed to mark articles as read');
+		console.error('Error marking articles as read:', error);
 	}
 }
 
@@ -596,15 +639,22 @@ async function deleteKeywordFilter(filterId: number) {
 	}
 }
 
-async function updateTimezone(timezone: string) {
-	const success = await settings.updateTimezone(timezone);
+async function updateTimezone(tz: string) {
+	const success = await settings.updateTimezone(tz);
 	if (success) {
-		selectedTimezone = timezone;
 		toast.success('Timezone updated successfully');
-		// Trigger config changed to reload feeds with new timezone
-		onconfigchanged();
 	} else {
 		toast.error('Failed to update timezone');
+	}
+}
+
+async function updateDefaultView(view: 'card' | 'headline' | 'column') {
+	const success = await settings.updateDefaultView(view);
+	if (success) {
+		selectedDefaultView = view;
+		toast.success('Default view updated successfully');
+	} else {
+		toast.error('Failed to update default view');
 	}
 }
 
@@ -742,14 +792,22 @@ function handleCategoryClick(category: string) {
 	onCategorySelect(category);
 }
 
+function handleFeedClick(feedUrl: string, feedName: string) {
+	onFeedSelect(feedUrl, feedName);
+}
+
 // Lifecycle
 onMount(() => {
 	loadFeedConfig();
+	loadCategories(); // Load categories to get counts
 	settings.load();
 	
 	// Subscribe to settings changes
-	const unsubscribe = settings.subscribe((s: { timezone: string; }) => {
+	const unsubscribe = settings.subscribe((s: { timezone: string; default_view?: 'card' | 'headline' | 'column' }) => {
 		selectedTimezone = s.timezone;
+		if (s.default_view) {
+			selectedDefaultView = s.default_view;
+		}
 	});
 	
 	// Cleanup subscription on unmount
@@ -777,14 +835,6 @@ $effect(() => {
 						<span class="font-semibold">All Categories</span>
 					</Sidebar.MenuButton>
 				</Sidebar.MenuItem>
-				<Sidebar.MenuItem>
-					<Sidebar.MenuButton
-						onclick={() => goto('/reports')}
-					>
-						<FileText class="mr-2 h-4 w-4" />
-						<span>Reports</span>
-					</Sidebar.MenuButton>
-				</Sidebar.MenuItem>
 			</Sidebar.Menu>
 		</Sidebar.Group>
 
@@ -799,61 +849,77 @@ $effect(() => {
 			</Sidebar.Group>
 		{:else}
 			<!-- Categories and Feeds -->
-			{#each categories as category}
-				<Sidebar.Group>
-					<Sidebar.GroupLabel>
-						<button
-							type="button"
-							onclick={() => toggleCategory(category)}
-							class="flex w-full items-center justify-between hover:text-foreground"
+		{#each categories as category}
+			<Sidebar.Group class="py-0">
+				<Sidebar.GroupLabel class="py-1.5 px-0">
+				{@const categoryData = categoriesList.find(c => c.name === category)}
+				<button
+					type="button"
+					onclick={() => toggleCategory(category)}
+					class="flex w-full items-center justify-between hover:text-foreground group px-2 py-1 rounded {selectedCategory === category ? 'bg-accent' : ''}"
+				>
+					<div class="flex items-center gap-2 flex-1 min-w-0">
+						<ChevronDown
+							class="h-4 w-4 transition-transform shrink-0 {expandedCategories.has(category) ? '' : '-rotate-90'}"
+						/>
+						<span
+							onclick={(e) => {
+								e.stopPropagation();
+								handleCategoryClick(category);
+							}}
+							class="text-sm font-semibold truncate {selectedCategory === category ? 'text-foreground' : 'text-foreground/90'}"
 						>
-							<span
-								onclick={(e) => {
-									e.stopPropagation();
-									handleCategoryClick(category);
-								}}
-								class="flex-1 text-left {selectedCategory === category ? 'font-semibold text-foreground' : ''}"
-							>
-								{category}
-							</span>
-							<ChevronDown
-								class="h-4 w-4 transition-transform {expandedCategories.has(category) ? '' : '-rotate-90'}"
-							/>
-						</button>
-					</Sidebar.GroupLabel>
+							{category}
+						</span>
+					</div>
+					{#if categoryData && categoryData.unread_count !== undefined}
+						<span class="text-xs text-muted-foreground font-normal shrink-0 ml-auto">
+							{categoryData.unread_count}/{categoryData.total_count}
+						</span>
+					{/if}
+				</button>
+			</Sidebar.GroupLabel>
 
 					{#if expandedCategories.has(category)}
 						<Sidebar.GroupContent>
 							<Sidebar.Menu>
 								{#each feedConfig[category] as feed}
 									<Sidebar.MenuItem>
-										<div class="group flex items-center gap-2 px-2 py-1.5">
+										<div class="group flex items-center gap-2 px-2 py-1.5 hover:bg-accent/50 rounded transition-colors">
 											<Checkbox
 												bind:checked={feed.isActive}
 												onCheckedChange={saveFeedConfig}
 												disabled={isSaving}
+												class="shrink-0"
 											/>
-											<span
-												class="flex-1 cursor-pointer text-sm {feed.isActive ? '' : 'text-muted-foreground line-through'}"
-											>
-												{feed.name}
-											</span>
-											<div class="hidden items-center gap-1 group-hover:flex">
+											<div class="flex items-center gap-2 flex-1 min-w-0">
+												<span
+													onclick={() => handleFeedClick(feed.url, feed.name)}
+													class="cursor-pointer text-sm truncate {selectedFeedUrl === feed.url ? 'font-semibold text-foreground' : (feed.isActive ? 'text-foreground/90' : 'text-muted-foreground line-through')}"
+												>
+													{feed.name}
+												</span>
+											</div>
+											{#if feed.unread_count !== undefined && feed.unread_count > 0}
+												<button
+													onclick={(e) => markAllFeedAsRead(feed.url, feed.name, e)}
+													class="group/count flex items-center gap-1 px-1.5 py-0.5 rounded hover:bg-accent transition-colors shrink-0 ml-auto"
+													title="Mark all as read"
+												>
+													<span class="text-xs text-muted-foreground group-hover/count:text-foreground font-medium">
+														{feed.unread_count}
+													</span>
+													<Check class="h-3 w-3 text-muted-foreground opacity-0 group-hover/count:opacity-100 transition-opacity" />
+												</button>
+											{/if}
+											<div class="hidden items-center gap-1 group-hover:flex shrink-0">
 												<Button
 													variant="ghost"
 													size="icon"
-													class="h-6 w-6"
+													class="h-5 w-5 text-muted-foreground hover:text-foreground"
 													onclick={() => openEditModal(feed, category)}
 												>
-													<Pencil class="h-3 w-3" />
-												</Button>
-												<Button
-													variant="ghost"
-													size="icon"
-													class="h-6 w-6"
-													onclick={() => deleteFeed(feed.id)}
-												>
-													<Trash2 class="h-3 w-3" />
+													<Pencil class="h-2.5 w-2.5" />
 												</Button>
 											</div>
 										</div>
@@ -1069,14 +1135,24 @@ $effect(() => {
 					</Select.Root>
 				</div>
 			</div>
-			<div class="mt-6 flex justify-end gap-2">
-				<Button variant="outline" onclick={closeEditModal}>Cancel</Button>
-				<Button onclick={updateFeed} disabled={isSaving}>
-					{#if isSaving}
-						<Loader2 class="mr-2 h-4 w-4 animate-spin" />
-					{/if}
-					Save Changes
+			<div class="mt-6 flex justify-between gap-2">
+				<Button 
+					variant="destructive" 
+					onclick={() => editingFeed && deleteFeed(editingFeed.id)}
+					disabled={isSaving}
+				>
+					<Trash2 class="mr-2 h-4 w-4" />
+					Delete Feed
 				</Button>
+				<div class="flex gap-2">
+					<Button variant="outline" onclick={closeEditModal}>Cancel</Button>
+					<Button onclick={updateFeed} disabled={isSaving}>
+						{#if isSaving}
+							<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+						{/if}
+						Save Changes
+					</Button>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -1088,12 +1164,12 @@ $effect(() => {
     <div class="p-6">
       <h3 class="mb-4 text-lg font-semibold">Settings</h3>
       <Tabs.Root bind:value={activeTab} class="w-full">
-        <Tabs.List class="grid w-full grid-cols-4">
-          <Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
-          <Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
-          <Tabs.Trigger value="timezone">Timezone</Tabs.Trigger>
-          <Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
-        </Tabs.List>
+<Tabs.List class="grid w-full grid-cols-4">
+    <Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
+    <Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
+    <Tabs.Trigger value="preferences">Preferences</Tabs.Trigger>
+    <Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
+</Tabs.List>
         <Tabs.Content value="categories" class="mt-4 min-h-[400px]">
           <div
             class="mb-4 max-h-[60vh] overflow-y-auto"
@@ -1354,24 +1430,42 @@ $effect(() => {
             {/if}
           </div>
         </Tabs.Content>
-        <Tabs.Content value="timezone" class="mt-4 min-h-[400px]">
-          <div class="space-y-4 p-4">
-            <div>
-              <h4 class="text-sm font-medium mb-2">Select Your Timezone</h4>
-              <p class="text-sm text-muted-foreground mb-4">Choose your preferred timezone for displaying article timestamps.</p>
-            </div>
-            <div class="space-y-2">
-              <label class="text-sm font-medium">Timezone</label>
-              <Select.Root type="single" bind:value={selectedTimezone}>
+<Tabs.Content value="preferences" class="mt-4 min-h-[400px]">
+    <div class="space-y-4 p-4">
+        <div>
+            <h4 class="text-sm font-medium mb-2">Default View Mode</h4>
+            <p class="text-sm text-muted-foreground mb-4">Choose how articles are displayed by default when you open the feeds page.</p>
+        </div>
+        <div class="space-y-2">
+            <label class="text-sm font-medium">View Mode</label>
+            <Select.Root type="single" bind:value={selectedDefaultView}>
+                <Select.Trigger class="w-full">
+                    {selectedDefaultView === 'card' ? 'Card View' : selectedDefaultView === 'headline' ? 'Headline View' : 'Column View'}
+                </Select.Trigger>
+                <Select.Content>
+                    <Select.Item value="card" onclick={() => updateDefaultView('card')}>Card View</Select.Item>
+                    <Select.Item value="headline" onclick={() => updateDefaultView('headline')}>Headline View</Select.Item>
+                    <Select.Item value="column" onclick={() => updateDefaultView('column')}>Column View</Select.Item>
+                </Select.Content>
+            </Select.Root>
+            <p class="text-xs text-muted-foreground mt-2">
+                <strong>Card View:</strong> Visual grid with thumbnails and descriptions<br/>
+                <strong>Headline View:</strong> Compact list of article titles<br/>
+                <strong>Column View:</strong> Split view with article list and content preview
+            </p>
+        </div>
+        <div class="space-y-2">
+            <label class="text-sm font-medium">Timezone</label>
+            <Select.Root type="single" bind:value={selectedTimezone}>
                 <Select.Trigger class="w-full">{selectedTimezone === 'Asia/Kolkata' ? 'IST (Asia/Kolkata)' : 'UTC'}</Select.Trigger>
                 <Select.Content>
-                  <Select.Item value="Asia/Kolkata" onclick={() => updateTimezone('Asia/Kolkata')}>IST (Asia/Kolkata)</Select.Item>
-                  <Select.Item value="UTC" onclick={() => updateTimezone('UTC')}>UTC</Select.Item>
+                    <Select.Item value="Asia/Kolkata" onclick={() => updateTimezone('Asia/Kolkata')}>IST (Asia/Kolkata)</Select.Item>
+                    <Select.Item value="UTC" onclick={() => updateTimezone('UTC')}>UTC</Select.Item>
                 </Select.Content>
-              </Select.Root>
-            </div>
-          </div>
-        </Tabs.Content>
+            </Select.Root>
+        </div>
+    </div>
+</Tabs.Content>
         <Tabs.Content value="backup" class="mt-4 min-h-[400px]">
           <div class="space-y-6 p-4">
             <!-- Database Backups Section -->
