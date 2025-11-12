@@ -1,7 +1,8 @@
 <script lang="ts">
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
-import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles, ChevronUp, ChevronDown, HelpCircle } from '@lucide/svelte';
+import { onMount, onDestroy } from 'svelte';
+import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles, ChevronUp, ChevronDown, HelpCircle, Bell } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
 import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import Button from '$lib/components/ui/button/index.svelte';
@@ -73,6 +74,12 @@ let showShortcutsModal = $state(false);
 
 // Search input reference for keyboard shortcuts
 let searchInputRef: HTMLInputElement | null = null;
+
+// Real-time updates state
+let lastCheckTimestamp = $state<string>(new Date().toISOString());
+let newArticlesCount = $state<number>(0);
+let newArticlesByCategory = $state<Record<string, number>>({});
+let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
 
 // Helper function to merge articles with read statuses
 function mergeWithReadStatus(articles: FeedItem[]): FeedItem[] {
@@ -684,6 +691,72 @@ $effect(() => {
 		observer.disconnect();
 	};
 });
+
+// Check for new articles since last timestamp
+async function checkForUpdates() {
+	try {
+		const response = await fetch(`/api/articles/updates?since=${encodeURIComponent(lastCheckTimestamp)}`);
+		if (!response.ok) return;
+		
+		const data = await response.json();
+		
+		if (data.total > 0) {
+			newArticlesCount = data.total;
+			newArticlesByCategory = data.by_category;
+			
+			// Show toast notification
+			const categoryText = Object.entries(data.by_category)
+				.map(([cat, count]) => `${cat}: ${count}`)
+				.join(', ');
+			
+			toast.info(`${data.total} new article${data.total > 1 ? 's' : ''} available${categoryText ? ` (${categoryText})` : ''}`, {
+				duration: 5000,
+				action: {
+					label: 'Refresh',
+					onClick: () => refreshToShowNewArticles()
+				}
+			});
+		}
+		
+		// Update timestamp for next check
+		lastCheckTimestamp = data.timestamp;
+	} catch (error) {
+		console.error('Error checking for updates:', error);
+	}
+}
+
+// Refresh page to show new articles
+async function refreshToShowNewArticles() {
+	newArticlesCount = 0;
+	newArticlesByCategory = {};
+	await loadInitialArticles();
+	toast.success('Feed refreshed!');
+}
+
+// Start polling for updates every 30 seconds
+onMount(() => {
+	// Initial timestamp
+	lastCheckTimestamp = new Date().toISOString();
+	
+	// Poll every 30 seconds
+	updateCheckInterval = setInterval(() => {
+		checkForUpdates();
+	}, 30000);
+	
+	// Cleanup on unmount
+	return () => {
+		if (updateCheckInterval) {
+			clearInterval(updateCheckInterval);
+		}
+	};
+});
+
+// Also cleanup on destroy
+onDestroy(() => {
+	if (updateCheckInterval) {
+		clearInterval(updateCheckInterval);
+	}
+});
 </script>
 
 <style>
@@ -719,6 +792,19 @@ $effect(() => {
 		</div>
 
 		<div class="flex items-center gap-3 shrink-0">
+			<!-- New Articles Indicator -->
+			{#if newArticlesCount > 0}
+				<Button
+					variant="outline"
+					size="sm"
+					onclick={refreshToShowNewArticles}
+					class="flex items-center gap-2 bg-primary/10 hover:bg-primary/20 border-primary/30"
+				>
+					<Bell class="size-4" />
+					<span class="font-medium">{newArticlesCount} new</span>
+				</Button>
+			{/if}
+			
 			<!-- Search Input -->
 			<div class="relative w-64">
 				<Search class="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />

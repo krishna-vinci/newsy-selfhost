@@ -44,3 +44,7 @@ class Config:
 
     # CORS Settings
     CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(',')
+    
+    # Cache Settings
+    CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() == "true"
+    CACHE_DURATION_SECONDS = int(os.getenv("CACHE_DURATION_SECONDS", "300"))  # Default: 5 minutes
