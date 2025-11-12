@@ -116,60 +116,6 @@ async function deleteSchedule(scheduleId: number) {
 	}
 }
 
-async function toggleCategoryNtfy(category: Category) {
-	const previousEnabled = category.ntfy_enabled;
-	category.ntfy_enabled = !category.ntfy_enabled;
-	
-	try {
-		const response = await fetch(`/api/category/${category.id}/ntfy`, {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				ntfy_enabled: category.ntfy_enabled
-			})
-		});
-		
-		if (!response.ok) {
-			throw new Error('Failed to update ntfy setting');
-		}
-		
-		toast.success(category.ntfy_enabled ? 'Ntfy notifications enabled' : 'Ntfy notifications disabled');
-	} catch (error) {
-		category.ntfy_enabled = previousEnabled;
-		console.error('Error toggling ntfy:', error);
-		toast.error('Failed to update ntfy setting');
-	}
-}
-
-async function updateCategoryTelegram(category: Category, enabled: boolean, chatId: string | null) {
-	const previousEnabled = category.telegram_enabled;
-	const previousChatId = category.telegram_chat_id;
-	
-	category.telegram_enabled = enabled;
-	category.telegram_chat_id = chatId;
-	
-	try {
-		const response = await fetch(`/api/category/${category.id}/telegram`, {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				telegram_enabled: enabled,
-				telegram_chat_id: chatId
-			})
-		});
-		
-		if (!response.ok) {
-			throw new Error('Failed to update telegram settings');
-		}
-		
-		toast.success(enabled ? 'Telegram notifications enabled' : 'Telegram notifications disabled');
-	} catch (error) {
-		category.telegram_enabled = previousEnabled;
-		category.telegram_chat_id = previousChatId;
-		console.error('Error updating telegram:', error);
-		toast.error('Failed to update telegram settings');
-	}
-}
 
 async function createSchedule() {
 	if (!selectedCategory) {
@@ -278,7 +224,12 @@ $effect(() => {
 <Sidebar.Provider class="h-full">
 <div class="flex w-full h-full">
 	<!-- Sidebar -->
-	<FeedSidebar selectedCategory="all" onCategorySelect={() => {}} onconfigchanged={async () => await invalidateAll()} />
+	<FeedSidebar 
+		selectedCategory="all" 
+		onCategorySelect={() => {}} 
+		onFeedSelect={() => {}}
+		onconfigchanged={async () => await invalidateAll()} 
+	/>
 
 	<!-- Main Content -->
 	<Sidebar.Inset class="h-full">
@@ -370,133 +321,6 @@ $effect(() => {
 					{/if}
 				</Card>
 
-				<!-- Category Notification Settings Section -->
-				<Card class="p-6">
-					<div class="mb-6">
-						<h2 class="text-xl font-semibold">Category Notification Settings</h2>
-						<p class="text-sm text-muted-foreground">Enable or disable notifications for each category</p>
-					</div>
-					<Separator class="mb-6" />
-
-					{#if categories.length === 0}
-						<div class="flex flex-col items-center justify-center py-12 text-center">
-							<Clock class="size-16 mb-4 text-muted-foreground" />
-							<p class="text-lg text-muted-foreground">No categories available</p>
-						</div>
-					{:else}
-						<Table.Root>
-							<Table.Header>
-								<Table.Row>
-									<Table.Head>Category</Table.Head>
-									<Table.Head>Ntfy</Table.Head>
-									<Table.Head>Telegram</Table.Head>
-									<Table.Head class="text-right">Status</Table.Head>
-								</Table.Row>
-							</Table.Header>
-							<Table.Body>
-								{#each categories as category (category.id)}
-									{@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
-									<Table.Row>
-										<Table.Cell>
-											<div class="flex flex-col gap-1">
-												<span class="font-medium">{category.name}</span>
-												<span class="text-xs text-muted-foreground font-mono">{topicName}</span>
-											</div>
-										</Table.Cell>
-										<Table.Cell>
-											<div class="flex items-center gap-2">
-												<Switch.Switch
-													checked={category.ntfy_enabled}
-													onCheckedChange={() => toggleCategoryNtfy(category)}
-												/>
-												<span class="text-sm">{category.ntfy_enabled ? 'On' : 'Off'}</span>
-											</div>
-										</Table.Cell>
-										<Table.Cell>
-											<div class="flex items-center gap-2">
-												<div class="h-4 w-4 text-muted-foreground">
-													<SocialIcons network="telegram" alt="" />
-												</div>
-												<Dialog.Root>
-													<Dialog.Trigger asChild>
-														<Switch.Switch
-															checked={category.telegram_enabled}
-															onCheckedChange={() => {
-																if (category.telegram_enabled) {
-																	updateCategoryTelegram(category, false, category.telegram_chat_id);
-																} else if (category.telegram_chat_id) {
-																	updateCategoryTelegram(category, true, category.telegram_chat_id);
-																}
-															}}
-														/>
-													</Dialog.Trigger>
-													<Dialog.Content class="sm:max-w-md">
-														<Dialog.Header>
-															<Dialog.Title>Telegram - {category.name}</Dialog.Title>
-															<Dialog.Description>
-																Configure Telegram notifications for this category.
-															</Dialog.Description>
-														</Dialog.Header>
-														<div class="space-y-4">
-															<div class="flex items-center gap-2">
-																<Switch.Switch 
-																	checked={category.telegram_enabled} 
-																	onCheckedChange={(checked) => {
-																		updateCategoryTelegram(category, checked, category.telegram_chat_id);
-																	}} 
-																/>
-																<span class="text-sm font-medium">Enable Telegram Notifications</span>
-															</div>
-															<div>
-																<label for="telegram-chat-id-{category.id}" class="text-sm font-medium">Chat ID</label>
-																<Input 
-																	id="telegram-chat-id-{category.id}" 
-																	type="text" 
-																	placeholder="Enter your Telegram Chat ID" 
-																	value={category.telegram_chat_id || ''}
-																	oninput={(e) => {
-																		const chatId = e.currentTarget.value.trim() || null;
-																		category.telegram_chat_id = chatId;
-																	}}
-																	class="mt-1"
-																/>
-																<p class="text-xs text-muted-foreground mt-1">Get your Chat ID from @userinfobot on Telegram</p>
-															</div>
-															<Button 
-																onclick={() => {
-																	if (category.telegram_chat_id) {
-																		updateCategoryTelegram(category, true, category.telegram_chat_id);
-																	} else {
-																		toast.error('Please enter a Chat ID');
-																	}
-																}}
-																class="w-full"
-															>
-																Save Settings
-															</Button>
-														</div>
-													</Dialog.Content>
-												</Dialog.Root>
-												<span class="text-sm">{category.telegram_enabled ? 'On' : 'Off'}</span>
-											</div>
-										</Table.Cell>
-										<Table.Cell class="text-right">
-											<div class="flex gap-2 justify-end">
-												<Badge variant={category.ntfy_enabled ? 'default' : 'secondary'}>
-													Ntfy: {category.ntfy_enabled ? 'On' : 'Off'}
-												</Badge>
-												<Badge variant={category.telegram_enabled ? 'default' : 'secondary'}>
-													Telegram: {category.telegram_enabled ? 'On' : 'Off'}
-												</Badge>
-											</div>
-										</Table.Cell>
-									</Table.Row>
-								{/each}
-							</Table.Body>
-						</Table.Root>
-					{/if}
-				</Card>
-
 				<!-- Generated Reports Section -->
 				<Card class="p-6">
 					<div class="mb-6">
@@ -560,11 +384,12 @@ $effect(() => {
 </Sidebar.Provider>
 
 <!-- Create Schedule Dialog -->
-<Dialog 
-	bind:open={createDialogOpen}
-	title="Create Report Schedule"
-	description="Set up an automated schedule to generate reports for a category"
->
+<Dialog.Root bind:open={createDialogOpen}>
+<Dialog.Content class="sm:max-w-md">
+	<Dialog.Header>
+		<Dialog.Title>Create Report Schedule</Dialog.Title>
+		<Dialog.Description>Set up an automated schedule to generate reports for a category</Dialog.Description>
+	</Dialog.Header>
 	<div class="grid gap-4">
 		<div class="grid gap-2">
 			<Label.Label for="category">Category</Label.Label>
@@ -624,13 +449,13 @@ $effect(() => {
 			</div>
 		</div>
 
-		<div class="flex justify-end gap-2 pt-4">
-			<Button variant="outline" onclick={() => createDialogOpen = false}>
-				Cancel
-			</Button>
-			<Button onclick={createSchedule} disabled={isCreating}>
-				{isCreating ? 'Creating...' : 'Create Schedule'}
-			</Button>
-		</div>
-	</div>
-</Dialog>
+	<Dialog.Footer>
+		<Button variant="outline" onclick={() => createDialogOpen = false}>
+			Cancel
+		</Button>
+		<Button onclick={createSchedule} disabled={isCreating}>
+			{isCreating ? 'Creating...' : 'Create Schedule'}
+		</Button>
+	</Dialog.Footer>
+</Dialog.Content>
+</Dialog.Root>

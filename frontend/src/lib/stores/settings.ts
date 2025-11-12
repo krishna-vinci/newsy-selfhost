@@ -2,10 +2,12 @@ import { writable } from 'svelte/store';
 
 export type Settings = {
 	timezone: string;
+	default_view?: 'card' | 'headline' | 'column';
 };
 
 const defaultSettings: Settings = {
-	timezone: 'Asia/Kolkata'
+	timezone: 'Asia/Kolkata',
+	default_view: 'card'
 };
 
 function createSettingsStore() {
@@ -44,6 +46,25 @@ function createSettingsStore() {
 				return true;
 			} catch (error) {
 				console.error('Error updating timezone:', error);
+				return false;
+			}
+		},
+		async updateDefaultView(default_view: 'card' | 'headline' | 'column') {
+			try {
+				const response = await fetch('/api/settings', {
+					method: 'PUT',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({ default_view })
+				});
+
+				if (!response.ok) {
+					throw new Error('Failed to update default view');
+				}
+
+				update(s => ({ ...s, default_view }));
+				return true;
+			} catch (error) {
+				console.error('Error updating default view:', error);
 				return false;
 			}
 		}
