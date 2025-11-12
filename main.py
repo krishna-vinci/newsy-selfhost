@@ -59,6 +59,7 @@ import backup_restore  # Import backup/restore/export module
 import database  # Import database module
 import ai_filter  # Import AI filtering module
 import keyword_filter  # Import keyword/topic filtering module
+import cache  # Import cache module
 
 load_dotenv()  # Load environment variables
 
@@ -506,6 +507,9 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
         if new_last_update > threshold:
             await update_feed_last_update(rss_url, new_last_update)
             logging.info("Updated feed state for %s → %s", rss_url, new_last_update)
+            
+            # Invalidate feed caches after new articles are added
+            cache.invalidate_feeds_cache()
 
     except Exception as e:
         logging.exception("Error parsing/storing feed for URL: %s | Error: %s", rss_url, e)
@@ -1076,6 +1080,12 @@ async def parse_rss_feed(rss_url: str, source_name: str = "Unknown"):
 @app.get("/api/feeds/config")
 async def get_feeds_config():
     """Get the current feed configuration from the database, ordered by priority."""
+    # Check cache first
+    cache_key = cache.generate_cache_key("feeds_config")
+    cached_result = cache.get_from_cache(cache_key)
+    if cached_result is not None:
+        return cached_result
+    
     conn = await get_db_connection()
     
     ordered_categories_rows = await conn.fetch('SELECT name FROM categories ORDER BY priority')
@@ -1107,7 +1117,10 @@ async def get_feeds_config():
         feeds_config[category_name] = feeds_by_category.get(category_name, [])
 
     await database.release_db_connection(conn)
-    return JSONResponse(content=feeds_config)
+    
+    result = JSONResponse(content=feeds_config)
+    cache.set_in_cache(cache_key, result)
+    return result
 
 @app.post("/api/feeds/config")
 async def update_feeds_config(request: Request):
@@ -1130,6 +1143,10 @@ async def update_feeds_config(request: Request):
                 'UPDATE feeds SET "isActive" = $1 WHERE id = $2',
                 updates
             )
+            
+            # Invalidate feed caches after config update
+            cache.invalidate_feeds_cache()
+            
             return JSONResponse({"message": "Feed configuration updated successfully"})
 
         except Exception as e:
@@ -1162,6 +1179,21 @@ async def feeds(
     - If `limit` and `offset` are provided, returns paginated results with metadata
     - If neither is provided, returns standard feed view grouped by category
     """
+    
+    # Check cache first
+    cache_key = cache.generate_cache_key(
+        "feeds", 
+        days=days, 
+        q=q, 
+        category=category, 
+        starred_only=starred_only, 
+        limit=limit, 
+        offset=offset, 
+        view=view
+    )
+    cached_result = cache.get_from_cache(cache_key)
+    if cached_result is not None:
+        return cached_result
     
     # Get user's timezone preference
     user_tz = await get_user_timezone()
@@ -1199,13 +1231,15 @@ async def feeds(
                 search_query=q
             )
         
-        return JSONResponse(content={
+        result = JSONResponse(content={
             "articles": articles,
             "total": total_count,
             "limit": limit,
             "offset": offset,
             "has_more": (offset + len(articles)) < total_count
         })
+        cache.set_in_cache(cache_key, result)
+        return result
     
     # Handle search queries (non-paginated)
     if q:
@@ -1217,10 +1251,12 @@ async def feeds(
         
         if category:
             # Return results for specific category
-            return JSONResponse(content=[{
+            result = JSONResponse(content=[{
                 "category": category,
                 "feed_items": search_results
             }])
+            cache.set_in_cache(cache_key, result)
+            return result
         else:
             # Group results by category for global search
             categories_dict = {}
@@ -1235,7 +1271,9 @@ async def feeds(
                 for cat, articles in categories_dict.items()
             ]
             
-            return JSONResponse(content=categories_list)
+            result = JSONResponse(content=categories_list)
+            cache.set_in_cache(cache_key, result)
+            return result
     
     # Standard feed view (no search, no pagination) - grouped by category
     conn = await get_db_connection()
@@ -1250,7 +1288,9 @@ async def feeds(
             if articles:
                 categories_list.append({"category": cat, "feed_items": articles})
                 
-        return JSONResponse(content=categories_list)
+        result = JSONResponse(content=categories_list)
+        cache.set_in_cache(cache_key, result)
+        return result
         
     finally:
         await database.release_db_connection(conn)
@@ -1279,6 +1319,9 @@ async def star_article(request: Request):
             if result == 'UPDATE 0':
                 return JSONResponse({"error": "Article not found"}, status_code=404)
             
+            # Invalidate feed caches after starring/unstarring
+            cache.invalidate_feeds_cache()
+            
             return JSONResponse({
                 "message": "Article starred status updated successfully",
                 "link": link,
@@ -1293,6 +1336,65 @@ async def star_article(request: Request):
     
     except Exception as e:
         logging.exception("Error updating starred status: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/articles/updates")
+async def get_articles_updates(since: str = Query(..., description="ISO 8601 timestamp to check for new articles since")):
+    """
+    Get count of new articles published since the provided timestamp.
+    This endpoint is NOT cached to provide real-time updates.
+    
+    Returns:
+        {
+            "total": 15,
+            "by_category": {
+                "Tech": 5,
+                "News": 10
+            },
+            "timestamp": "2025-01-01T12:00:00Z"
+        }
+    """
+    try:
+        # Parse the timestamp
+        since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Get total count of new articles
+            total_count = await conn.fetchval(
+                'SELECT COUNT(*) FROM articles WHERE published_datetime > $1',
+                since_dt
+            )
+            
+            # Get count by category
+            category_rows = await conn.fetch(
+                '''
+                SELECT category, COUNT(*) as count 
+                FROM articles 
+                WHERE published_datetime > $1 
+                GROUP BY category
+                ORDER BY category
+                ''',
+                since_dt
+            )
+            
+            by_category = {row['category']: row['count'] for row in category_rows}
+            
+            return JSONResponse(content={
+                "total": total_count,
+                "by_category": by_category,
+                "timestamp": datetime.now(pytz.utc).isoformat()
+            })
+            
+        finally:
+            await database.release_db_connection(conn)
+    
+    except ValueError as e:
+        logging.error(f"Invalid timestamp format: {e}")
+        return JSONResponse({"error": "Invalid timestamp format. Use ISO 8601 format."}, status_code=400)
+    except Exception as e:
+        logging.exception(f"Error fetching article updates: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/articles/statuses")
@@ -1441,6 +1543,12 @@ async def add_feed(request: Request):
 @app.get("/api/article-full-text")
 async def article_full_text(url: str):
     try:
+        # Check cache first
+        cache_key = cache.generate_cache_key("article_full_text", url=url)
+        cached_result = cache.get_from_cache(cache_key)
+        if cached_result is not None:
+            return cached_result
+        
         conn = await get_db_connection()
         content_html = await conn.fetchval('SELECT content FROM articles WHERE link = $1', url)
         await database.release_db_connection(conn)
@@ -1458,9 +1566,13 @@ async def article_full_text(url: str):
         if content_html:
             # Format the article content for consistent, readable display
             formatted_content = format_article_content(content_html)
-            return JSONResponse({"content": formatted_content})
+            result = JSONResponse({"content": formatted_content})
         else:
-            return JSONResponse({"content": "<p>No content could be extracted.</p>"})
+            result = JSONResponse({"content": "<p>No content could be extracted.</p>"})
+        
+        # Cache the result
+        cache.set_in_cache(cache_key, result)
+        return result
 
     except Exception as e:
         logging.exception(f"Error fetching full text for {url}: {e}")
@@ -1574,6 +1686,12 @@ async def update_settings(request: Request):
 @app.get("/api/categories")
 async def get_categories():
     """Get all categories, ordered by priority."""
+    # Check cache first
+    cache_key = cache.generate_cache_key("categories")
+    cached_result = cache.get_from_cache(cache_key)
+    if cached_result is not None:
+        return cached_result
+    
     conn = await get_db_connection()
     rows = await conn.fetch("SELECT id, name, priority, is_default, ntfy_enabled, telegram_enabled, telegram_chat_id, ai_prompt, ai_enabled FROM categories ORDER BY priority")
     categories = [{
@@ -1588,7 +1706,10 @@ async def get_categories():
         "ai_enabled": row['ai_enabled']
     } for row in rows]
     await database.release_db_connection(conn)
-    return JSONResponse(content=categories)
+    
+    result = JSONResponse(content=categories)
+    cache.set_in_cache(cache_key, result)
+    return result
 
 @app.put("/api/categories/order")
 async def update_category_order(request: Request):
