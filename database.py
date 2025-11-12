@@ -31,8 +31,8 @@ async def init_db_pool():
             password=Config.DB_PASSWORD,
             host=Config.DB_HOST,
             port=Config.DB_PORT,
-            min_size=2,
-            max_size=10,
+            min_size=5,
+            max_size=50,  # Increased for high-volume feed processing
             command_timeout=60
         )
         logger.info("Database connection pool initialized")
@@ -69,7 +69,7 @@ async def init_db():
     conn = await get_db_connection()
     
     try:
-        # Categories table - includes ntfy_enabled, ai_prompt, ai_enabled
+        # Categories table - includes ntfy_enabled, telegram_enabled, ai_prompt, ai_enabled
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS categories (
                 id SERIAL PRIMARY KEY,
@@ -77,13 +77,15 @@ async def init_db():
                 priority INTEGER DEFAULT 0,
                 is_default BOOLEAN DEFAULT false,
                 ntfy_enabled BOOLEAN DEFAULT true,
+                telegram_enabled BOOLEAN DEFAULT false,
+                telegram_chat_id TEXT DEFAULT NULL,
                 ai_prompt TEXT DEFAULT NULL,
                 ai_enabled BOOLEAN DEFAULT false
             );
         """)
         logger.info("Categories table initialized")
         
-        # Feeds table - includes display_order, retention_days
+        # Feeds table - includes display_order, retention_days, polling_interval
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS feeds (
                 id SERIAL PRIMARY KEY,
@@ -93,7 +95,8 @@ async def init_db():
                 "isActive" BOOLEAN DEFAULT true,
                 priority INTEGER DEFAULT 0,
                 retention_days INTEGER,
-                display_order INTEGER DEFAULT 0
+                display_order INTEGER DEFAULT 0,
+                polling_interval INTEGER DEFAULT 60
             );
         """)
         logger.info("Feeds table initialized")
@@ -250,6 +253,30 @@ async def init_db():
             logger.info("Added auto_starred_by column to articles table")
         except Exception as e:
             logger.debug(f"auto_starred_by column might already exist: {e}")
+        
+        # Add telegram_enabled and telegram_chat_id columns to categories if they don't exist
+        try:
+            await conn.execute("""
+                ALTER TABLE categories 
+                ADD COLUMN IF NOT EXISTS telegram_enabled BOOLEAN DEFAULT false;
+            """)
+            await conn.execute("""
+                ALTER TABLE categories 
+                ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT DEFAULT NULL;
+            """)
+            logger.info("Added telegram_enabled and telegram_chat_id columns to categories table")
+        except Exception as e:
+            logger.debug(f"Telegram columns might already exist: {e}")
+        
+        # Add polling_interval column to feeds if it doesn't exist
+        try:
+            await conn.execute("""
+                ALTER TABLE feeds 
+                ADD COLUMN IF NOT EXISTS polling_interval INTEGER DEFAULT 60;
+            """)
+            logger.info("Added polling_interval column to feeds table")
+        except Exception as e:
+            logger.debug(f"polling_interval column might already exist: {e}")
         
         # Initialize default timezone setting if not exists
         timezone_exists = await conn.fetchval(

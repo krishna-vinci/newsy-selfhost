@@ -2,12 +2,14 @@
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
 import { Calendar, FileText, Download, Trash2, Plus, Clock } from '@lucide/svelte';
+import SocialIcons from '@rodneylab/svelte-social-icons';
 import { toast } from 'svelte-sonner';
 import Button from '$lib/components/ui/button/index.svelte';
 import Badge from '$lib/components/ui/badge/index.svelte';
 import Card from '$lib/components/ui/card/index.svelte';
 import * as Table from '$lib/components/ui/table/index.ts';
-import Dialog from '$lib/components/ui/dialog/index.svelte';
+import * as Dialog from '$lib/components/ui/dialog/index.ts';
+import Input from '$lib/components/ui/input/index.svelte';
 import * as Select from '$lib/components/ui/select/index.js';
 import * as Label from '$lib/components/ui/label/index.ts';
 import * as Switch from '$lib/components/ui/switch/index.ts';
@@ -40,6 +42,8 @@ type Category = {
 	priority: number;
 	is_default: boolean;
 	ntfy_enabled: boolean;
+	telegram_enabled: boolean;
+	telegram_chat_id: string | null;
 };
 
 // State
@@ -112,30 +116,6 @@ async function deleteSchedule(scheduleId: number) {
 	}
 }
 
-async function toggleCategoryNtfy(category: Category) {
-	const previousEnabled = category.ntfy_enabled;
-	category.ntfy_enabled = !category.ntfy_enabled;
-	
-	try {
-		const response = await fetch(`/api/category/${category.id}/ntfy`, {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				ntfy_enabled: category.ntfy_enabled
-			})
-		});
-		
-		if (!response.ok) {
-			throw new Error('Failed to update ntfy setting');
-		}
-		
-		toast.success(category.ntfy_enabled ? 'Ntfy notifications enabled' : 'Ntfy notifications disabled');
-	} catch (error) {
-		category.ntfy_enabled = previousEnabled;
-		console.error('Error toggling ntfy:', error);
-		toast.error('Failed to update ntfy setting');
-	}
-}
 
 async function createSchedule() {
 	if (!selectedCategory) {
@@ -244,7 +224,12 @@ $effect(() => {
 <Sidebar.Provider class="h-full">
 <div class="flex w-full h-full">
 	<!-- Sidebar -->
-	<FeedSidebar selectedCategory="all" onCategorySelect={() => {}} onconfigchanged={async () => await invalidateAll()} />
+	<FeedSidebar 
+		selectedCategory="all" 
+		onCategorySelect={() => {}} 
+		onFeedSelect={() => {}}
+		onconfigchanged={async () => await invalidateAll()} 
+	/>
 
 	<!-- Main Content -->
 	<Sidebar.Inset class="h-full">
@@ -336,59 +321,6 @@ $effect(() => {
 					{/if}
 				</Card>
 
-				<!-- Category Notification Settings Section -->
-				<Card class="p-6">
-					<div class="mb-6">
-						<h2 class="text-xl font-semibold">Category Notification Settings</h2>
-						<p class="text-sm text-muted-foreground">Enable or disable ntfy notifications for each category</p>
-					</div>
-					<Separator class="mb-6" />
-
-					{#if categories.length === 0}
-						<div class="flex flex-col items-center justify-center py-12 text-center">
-							<Clock class="size-16 mb-4 text-muted-foreground" />
-							<p class="text-lg text-muted-foreground">No categories available</p>
-						</div>
-					{:else}
-						<Table.Root>
-							<Table.Header>
-								<Table.Row>
-									<Table.Head>Category</Table.Head>
-									<Table.Head>Ntfy Notifications</Table.Head>
-									<Table.Head class="text-right">Actions</Table.Head>
-								</Table.Row>
-							</Table.Header>
-							<Table.Body>
-								{#each categories as category (category.id)}
-									{@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
-									<Table.Row>
-										<Table.Cell>
-											<div class="flex flex-col gap-1">
-												<span class="font-medium">{category.name}</span>
-												<span class="text-xs text-muted-foreground font-mono">{topicName}</span>
-											</div>
-										</Table.Cell>
-										<Table.Cell>
-											<div class="flex items-center gap-2">
-												<Switch.Switch
-													checked={category.ntfy_enabled}
-													onCheckedChange={() => toggleCategoryNtfy(category)}
-												/>
-												<span class="text-sm">{category.ntfy_enabled ? 'Enabled' : 'Disabled'}</span>
-											</div>
-										</Table.Cell>
-										<Table.Cell class="text-right">
-											<Badge variant={category.ntfy_enabled ? 'default' : 'secondary'}>
-												{category.ntfy_enabled ? 'Active' : 'Inactive'}
-											</Badge>
-										</Table.Cell>
-									</Table.Row>
-								{/each}
-							</Table.Body>
-						</Table.Root>
-					{/if}
-				</Card>
-
 				<!-- Generated Reports Section -->
 				<Card class="p-6">
 					<div class="mb-6">
@@ -452,11 +384,12 @@ $effect(() => {
 </Sidebar.Provider>
 
 <!-- Create Schedule Dialog -->
-<Dialog 
-	bind:open={createDialogOpen}
-	title="Create Report Schedule"
-	description="Set up an automated schedule to generate reports for a category"
->
+<Dialog.Root bind:open={createDialogOpen}>
+<Dialog.Content class="sm:max-w-md">
+	<Dialog.Header>
+		<Dialog.Title>Create Report Schedule</Dialog.Title>
+		<Dialog.Description>Set up an automated schedule to generate reports for a category</Dialog.Description>
+	</Dialog.Header>
 	<div class="grid gap-4">
 		<div class="grid gap-2">
 			<Label.Label for="category">Category</Label.Label>
@@ -516,13 +449,13 @@ $effect(() => {
 			</div>
 		</div>
 
-		<div class="flex justify-end gap-2 pt-4">
-			<Button variant="outline" onclick={() => createDialogOpen = false}>
-				Cancel
-			</Button>
-			<Button onclick={createSchedule} disabled={isCreating}>
-				{isCreating ? 'Creating...' : 'Create Schedule'}
-			</Button>
-		</div>
-	</div>
-</Dialog>
+	<Dialog.Footer>
+		<Button variant="outline" onclick={() => createDialogOpen = false}>
+			Cancel
+		</Button>
+		<Button onclick={createSchedule} disabled={isCreating}>
+			{isCreating ? 'Creating...' : 'Create Schedule'}
+		</Button>
+	</Dialog.Footer>
+</Dialog.Content>
+</Dialog.Root>

@@ -59,6 +59,7 @@ import backup_restore  # Import backup/restore/export module
 import database  # Import database module
 import ai_filter  # Import AI filtering module
 import keyword_filter  # Import keyword/topic filtering module
+import cache  # Import cache module
 
 load_dotenv()  # Load environment variables
 
@@ -117,16 +118,9 @@ IST = pytz.timezone("Asia/Kolkata")
 # --- FastAPI App & Templates ---
 app = FastAPI()
 
-origins = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://0.0.0.0:5173",
-    "http://0.0.0.0:8324",
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=Config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -240,6 +234,91 @@ async def send_ntfy_notification(title: str, link: str, description: str, catego
 
 
 # ---- ntfy end ----- #
+
+
+async def send_telegram_notification(title: str, link: str, description: str, category: str, source: str, thumbnail: str = None):
+    """Send notification to Telegram for new articles."""
+    # Check if telegram is enabled for this category and get chat_id
+    try:
+        conn = await get_db_connection()
+        row = await conn.fetchrow(
+            "SELECT telegram_enabled, telegram_chat_id FROM categories WHERE name = $1", 
+            category
+        )
+        await database.release_db_connection(conn)
+        
+        if not row or row['telegram_enabled'] is False:
+            logging.debug(f"Telegram notifications disabled for category: {category}")
+            return
+        
+        chat_id = row['telegram_chat_id']
+        if not chat_id:
+            logging.debug(f"No Telegram chat ID configured for category: {category}")
+            return
+            
+    except Exception as e:
+        logging.warning(f"Could not check telegram status for category {category}: {e}")
+        return
+    
+    # Get bot token from config
+    from config import Config
+    bot_token = Config.TELEGRAM_BOT_TOKEN
+    
+    if not bot_token:
+        logging.warning("TELEGRAM_BOT_TOKEN not configured")
+        return
+    
+    # Format the message with Markdown
+    title = sanitize_text(title)
+    description = sanitize_text(description)
+    
+    # Escape special characters for Telegram MarkdownV2
+    def escape_markdown(text):
+        """Escape special characters for Telegram MarkdownV2."""
+        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in special_chars:
+            text = text.replace(char, f'\\{char}')
+        return text
+    
+    escaped_title = escape_markdown(title)
+    escaped_description = escape_markdown(description[:300])  # Limit description length
+    escaped_source = escape_markdown(source)
+    escaped_link = link  # URLs don't need escaping in markdown links
+    
+    message = f"*{escaped_title}*\n\n{escaped_description}\n\n_via {escaped_source}_\n\n[Read Full Article]({escaped_link})"
+    
+    # Send the notification
+    telegram_api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "MarkdownV2",
+        "disable_web_page_preview": False
+    }
+    
+    # If thumbnail is available, send as photo with caption instead
+    if thumbnail:
+        telegram_api_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+        payload = {
+            "chat_id": chat_id,
+            "photo": thumbnail,
+            "caption": message,
+            "parse_mode": "MarkdownV2"
+        }
+    
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(telegram_api_url, json=payload)
+            response.raise_for_status()
+            logging.debug(f"Telegram notification sent for article: {title}")
+    except httpx.HTTPStatusError as e:
+        logging.error(f"Failed to send Telegram notification: {e.response.text}")
+    except Exception as e:
+        logging.error(f"Failed to send Telegram notification: {e}")
+
+
+# ---- telegram end ----- #
 
 
 
@@ -398,11 +477,11 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
             # Insert article and get its ID
             article_id = await conn.fetchval(
                 'INSERT INTO articles '
-                '(title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id) '
-                'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) '
+                '(title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) '
+                'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) '
                 'RETURNING id',
                 title, link, description, thumbnail_url,
-                 published_formatted, pub_dt, category, article_content, source_name, feed_id
+                 published_formatted, pub_dt, category, article_content, source_name, feed_id, rss_url
             )
 
             # Process with AI filter if enabled for this category (only for NEW articles)
@@ -421,18 +500,37 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 logging.warning(f"Keyword filter processing failed for article {article_id}: {e}")
 
             await send_ntfy_notification(title, link, description, category, source_name)
+            await send_telegram_notification(title, link, description, category, source_name, thumbnail_url)
 
         await database.release_db_connection(conn)
 
         if new_last_update > threshold:
             await update_feed_last_update(rss_url, new_last_update)
             logging.info("Updated feed state for %s → %s", rss_url, new_last_update)
+            
+            # Invalidate feed caches after new articles are added
+            cache.invalidate_feeds_cache()
 
     except Exception as e:
         logging.exception("Error parsing/storing feed for URL: %s | Error: %s", rss_url, e)
 
 
+async def fetch_single_feed(feed_id: int, name: str, url: str, category: str):
+    """Fetch a single feed by its ID"""
+    start_time = datetime.now(IST)
+    logging.info("Feed update started for '%s' at %s", name, start_time)
+    
+    try:
+        await parse_and_store_rss_feed(feed_id, url, category, source_name=name)
+    except Exception as e:
+        logging.error(f"Error fetching feed '{name}': {e}")
+    finally:
+        end_time = datetime.now(IST)
+        logging.info("Feed update completed for '%s' at %s", name, end_time)
+
+
 async def fetch_all_feeds_db():
+    """Fetch all active feeds (used for initial startup)"""
     start_time = datetime.now(IST)
     logging.info("Feed update started at %s", start_time)
     
@@ -455,7 +553,46 @@ async def fetch_all_feeds_db():
         logging.info("Feed update completed at %s", end_time)
 
 
-async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None):
+async def schedule_all_feeds():
+    """Schedule individual jobs for each active feed based on their polling_interval"""
+    conn = await get_db_connection()
+    
+    try:
+        active_feeds = await conn.fetch('SELECT id, name, url, category, polling_interval FROM feeds WHERE "isActive" = true')
+        
+        for feed in active_feeds:
+            feed_id = feed['id']
+            name = feed['name']
+            url = feed['url']
+            category = feed['category']
+            polling_interval = feed['polling_interval'] or 1  # Default to 1 minute if None
+            
+            # Create unique job ID for this feed
+            job_id = f"feed_{feed_id}"
+            
+            # Remove existing job if it exists
+            if scheduler.get_job(job_id):
+                scheduler.remove_job(job_id)
+            
+            # Schedule the feed with its custom interval
+            scheduler.add_job(
+                fetch_single_feed,
+                'interval',
+                minutes=polling_interval,
+                args=[feed_id, name, url, category],
+                id=job_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=300
+            )
+            
+            logging.info(f"Scheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
+    
+    finally:
+        await database.release_db_connection(conn)
+
+
+async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None, feed_url: str = None):
     """Get total count of articles for pagination"""
     threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
@@ -477,6 +614,10 @@ async def get_total_articles_count(category: str = None, days: int = 2, starred_
             if category:
                 query = query.replace("AND (a.title", "AND a.category = $3 AND (a.title")
                 params.append(category)
+            
+            if feed_url:
+                query += f" AND f.url = ${len(params) + 1}"
+                params.append(feed_url)
                 
             if starred_only:
                 query += " AND a.starred = true"
@@ -494,6 +635,10 @@ async def get_total_articles_count(category: str = None, days: int = 2, starred_
             if category:
                 query += " AND a.category = $2"
                 params.append(category)
+            
+            if feed_url:
+                query += f" AND f.url = ${len(params) + 1}"
+                params.append(feed_url)
                 
             if starred_only:
                 query += " AND a.starred = true"
@@ -610,11 +755,11 @@ async def get_articles_for_category_db(category: str, days: int = 2, starred_onl
              article = await convert_article_timezone(article, target_tz)
          
          articles.append(article)
-     await conn.close()
+     await database.release_db_connection(conn)
      return articles
 
 
-async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, limit: int = 100, offset: int = 0, category: str = None, target_tz=None, view: str = "standard"):
+async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, limit: int = 100, offset: int = 0, category: str = None, feed_url: str = None, target_tz=None, view: str = "standard"):
     """Get articles across all categories with pagination"""
     threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
@@ -648,6 +793,10 @@ async def get_all_articles_paginated(days: int = 2, starred_only: bool = False, 
         if category:
             query += " AND a.category = $2"
             params.append(category)
+        
+        if feed_url:
+            query += f" AND f.url = ${len(params) + 1}"
+            params.append(feed_url)
         
         if starred_only:
             query += f" AND a.starred = true"
@@ -748,7 +897,9 @@ async def startup_event():
     # Build initial search index
     asyncio.create_task(build_search_index())
     
-    scheduler.add_job(fetch_all_feeds_db, 'interval', minutes=1)
+    # Schedule individual feeds with their custom polling intervals
+    await schedule_all_feeds()
+    
     scheduler.add_job(cleanup_old_articles, 'cron', hour=0)  # Run daily at midnight
     scheduler.add_job(build_search_index, 'interval', minutes=5)  # Update search index every 5 minutes
     scheduler.start()
@@ -940,17 +1091,41 @@ async def parse_rss_feed(rss_url: str, source_name: str = "Unknown"):
 
 @app.get("/api/feeds/config")
 async def get_feeds_config():
-    """Get the current feed configuration from the database, ordered by priority."""
+    """Get the current feed configuration from the database with unread counts, ordered by priority."""
+    # Check cache first
+    cache_key = cache.generate_cache_key("feeds_config")
+    cached_result = cache.get_from_cache(cache_key)
+    if cached_result is not None:
+        return cached_result
+    
     conn = await get_db_connection()
+    
+    # Get threshold for last 7 days
+    threshold = datetime.now(IST) - timedelta(days=7)
     
     ordered_categories_rows = await conn.fetch('SELECT name FROM categories ORDER BY priority')
     ordered_categories = [row['name'] for row in ordered_categories_rows]
     
-    all_feeds_rows = await conn.fetch('SELECT id, name, url, category, "isActive", priority, retention_days FROM feeds')
+    all_feeds_rows = await conn.fetch('SELECT id, name, url, category, "isActive", priority, retention_days, polling_interval FROM feeds')
     
     feeds_by_category = {}
     for row in all_feeds_rows:
         category = row['category']
+        feed_id = row['id']
+        
+        # Get unread count for this feed using feed_id (works for all articles)
+        unread_count = await conn.fetchval(
+            '''
+            SELECT COUNT(*) 
+            FROM articles a
+            LEFT JOIN user_article_status uas ON a.link = uas.article_link
+            WHERE a.feed_id = $1
+            AND a.published_datetime > $2
+            AND (uas.is_read IS NULL OR uas.is_read = false)
+            ''',
+            feed_id, threshold
+        )
+        
         if category not in feeds_by_category:
             feeds_by_category[category] = []
         feeds_by_category[category].append({
@@ -959,8 +1134,12 @@ async def get_feeds_config():
             "url": row['url'],
             "isActive": row['isActive'],
             "priority": row['priority'],
-            "retention_days": row['retention_days']
+            "retention_days": row['retention_days'],
+            "polling_interval": row['polling_interval'],
+            "unread_count": unread_count
         })
+        
+        logging.info(f"[Feeds] {row['name']}: unread={unread_count}")
         
     for category in feeds_by_category:
         feeds_by_category[category].sort(key=lambda x: x['priority'])
@@ -970,8 +1149,11 @@ async def get_feeds_config():
         # Include all categories, even if they have no feeds
         feeds_config[category_name] = feeds_by_category.get(category_name, [])
 
-    await conn.close()
-    return JSONResponse(content=feeds_config)
+    await database.release_db_connection(conn)
+    
+    result = JSONResponse(content=feeds_config)
+    cache.set_in_cache(cache_key, result)
+    return result
 
 @app.post("/api/feeds/config")
 async def update_feeds_config(request: Request):
@@ -994,6 +1176,10 @@ async def update_feeds_config(request: Request):
                 'UPDATE feeds SET "isActive" = $1 WHERE id = $2',
                 updates
             )
+            
+            # Invalidate feed caches after config update
+            cache.invalidate_feeds_cache()
+            
             return JSONResponse({"message": "Feed configuration updated successfully"})
 
         except Exception as e:
@@ -1011,6 +1197,7 @@ async def feeds(
     days: int = Query(2, description="Number of days back to fetch articles for.", ge=1, le=30),
     q: str = Query(None, description="Search query for articles"),
     category: str = Query(None, description="Category filter for search"),
+    feed_url: str = Query(None, description="Feed URL to filter by specific feed"),
     starred_only: bool = Query(False, description="Filter to show only starred articles"),
     limit: int = Query(None, description="Number of articles to return (for pagination)", ge=1, le=500),
     offset: int = Query(None, description="Number of articles to skip (for pagination)", ge=0),
@@ -1027,6 +1214,22 @@ async def feeds(
     - If neither is provided, returns standard feed view grouped by category
     """
     
+    # Check cache first
+    cache_key = cache.generate_cache_key(
+        "feeds", 
+        days=days, 
+        q=q, 
+        category=category,
+        feed_url=feed_url,
+        starred_only=starred_only, 
+        limit=limit, 
+        offset=offset, 
+        view=view
+    )
+    cached_result = cache.get_from_cache(cache_key)
+    if cached_result is not None:
+        return cached_result
+    
     # Get user's timezone preference
     user_tz = await get_user_timezone()
     
@@ -1041,6 +1244,7 @@ async def feeds(
             limit=limit,
             offset=offset,
             category=category,
+            feed_url=feed_url,
             target_tz=user_tz,
             view=view
         )
@@ -1060,16 +1264,19 @@ async def feeds(
                 category=category,
                 days=days,
                 starred_only=starred_only,
-                search_query=q
+                search_query=q,
+                feed_url=feed_url
             )
         
-        return JSONResponse(content={
+        result = JSONResponse(content={
             "articles": articles,
             "total": total_count,
             "limit": limit,
             "offset": offset,
             "has_more": (offset + len(articles)) < total_count
         })
+        cache.set_in_cache(cache_key, result)
+        return result
     
     # Handle search queries (non-paginated)
     if q:
@@ -1081,10 +1288,12 @@ async def feeds(
         
         if category:
             # Return results for specific category
-            return JSONResponse(content=[{
+            result = JSONResponse(content=[{
                 "category": category,
                 "feed_items": search_results
             }])
+            cache.set_in_cache(cache_key, result)
+            return result
         else:
             # Group results by category for global search
             categories_dict = {}
@@ -1099,7 +1308,9 @@ async def feeds(
                 for cat, articles in categories_dict.items()
             ]
             
-            return JSONResponse(content=categories_list)
+            result = JSONResponse(content=categories_list)
+            cache.set_in_cache(cache_key, result)
+            return result
     
     # Standard feed view (no search, no pagination) - grouped by category
     conn = await get_db_connection()
@@ -1114,7 +1325,9 @@ async def feeds(
             if articles:
                 categories_list.append({"category": cat, "feed_items": articles})
                 
-        return JSONResponse(content=categories_list)
+        result = JSONResponse(content=categories_list)
+        cache.set_in_cache(cache_key, result)
+        return result
         
     finally:
         await database.release_db_connection(conn)
@@ -1143,6 +1356,9 @@ async def star_article(request: Request):
             if result == 'UPDATE 0':
                 return JSONResponse({"error": "Article not found"}, status_code=404)
             
+            # Invalidate feed caches after starring/unstarring
+            cache.invalidate_feeds_cache()
+            
             return JSONResponse({
                 "message": "Article starred status updated successfully",
                 "link": link,
@@ -1157,6 +1373,72 @@ async def star_article(request: Request):
     
     except Exception as e:
         logging.exception("Error updating starred status: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/articles/updates")
+async def get_articles_updates(since: str = Query(..., description="ISO 8601 timestamp to check for new articles since")):
+    """
+    Get count of new articles published since the provided timestamp.
+    This endpoint is NOT cached to provide real-time updates.
+    
+    Returns:
+        {
+            "total": 15,
+            "by_category": {
+                "Tech": 5,
+                "News": 10
+            },
+            "timestamp": "2025-01-01T12:00:00Z"
+        }
+    """
+    try:
+        # Parse the timestamp
+        since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
+        logging.info(f"[Updates] Checking for articles since: {since_dt}")
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Get total count of new articles
+            total_count = await conn.fetchval(
+                'SELECT COUNT(*) FROM articles WHERE published_datetime > $1',
+                since_dt
+            )
+            
+            logging.info(f"[Updates] Found {total_count} new articles")
+            
+            # Get count by category
+            category_rows = await conn.fetch(
+                '''
+                SELECT category, COUNT(*) as count 
+                FROM articles 
+                WHERE published_datetime > $1 
+                GROUP BY category
+                ORDER BY category
+                ''',
+                since_dt
+            )
+            
+            by_category = {row['category']: row['count'] for row in category_rows}
+            
+            response_data = {
+                "total": total_count,
+                "by_category": by_category,
+                "timestamp": datetime.now(pytz.utc).isoformat()
+            }
+            
+            logging.debug(f"[Updates] Response: {response_data}")
+            
+            return JSONResponse(content=response_data)
+            
+        finally:
+            await database.release_db_connection(conn)
+    
+    except ValueError as e:
+        logging.error(f"Invalid timestamp format: {e}")
+        return JSONResponse({"error": "Invalid timestamp format. Use ISO 8601 format."}, status_code=400)
+    except Exception as e:
+        logging.exception(f"Error fetching article updates: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.post("/api/articles/statuses")
@@ -1233,6 +1515,74 @@ async def mark_articles_as_read(request: Request):
         logging.exception("Error marking articles as read: %s", str(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@app.post("/api/feed/mark-all-read")
+async def mark_feed_articles_as_read(request: Request):
+    """Mark all unread articles from a specific feed as read."""
+    try:
+        body = await request.json()
+        feed_url = body.get("feed_url", "").strip()
+        
+        if not feed_url:
+            return JSONResponse({"message": "Feed URL is required"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        try:
+            # Get feed_id from URL
+            feed_id = await conn.fetchval("SELECT id FROM feeds WHERE url = $1", feed_url)
+            if not feed_id:
+                return JSONResponse({"message": "Feed not found"}, status_code=404)
+            
+            # Get threshold for last 7 days
+            threshold = datetime.now(IST) - timedelta(days=7)
+            
+            # Get all article links from this feed that are unread (using feed_id)
+            articles = await conn.fetch(
+                '''
+                SELECT a.link 
+                FROM articles a
+                LEFT JOIN user_article_status uas ON a.link = uas.article_link
+                WHERE a.feed_id = $1 
+                AND a.published_datetime > $2
+                AND (uas.is_read IS NULL OR uas.is_read = false)
+                ''',
+                feed_id, threshold
+            )
+            
+            # Mark all as read
+            count = 0
+            for article in articles:
+                await conn.execute(
+                    '''
+                    INSERT INTO user_article_status (article_link, is_read, read_at)
+                    VALUES ($1, true, CURRENT_TIMESTAMP)
+                    ON CONFLICT (article_link) 
+                    DO UPDATE SET is_read = true, read_at = CURRENT_TIMESTAMP
+                    ''',
+                    article['link']
+                )
+                count += 1
+            
+            # Invalidate cache
+            cache.invalidate_feeds_cache()
+            
+            logging.info(f"[MarkAllRead] Marked {count} articles as read for feed: {feed_url}")
+            
+            return JSONResponse({
+                "message": f"Marked {count} article(s) as read",
+                "count": count
+            })
+        
+        except asyncpg.PostgresError as e:
+            logging.exception("Database error marking feed articles as read: %s", str(e))
+            return JSONResponse({"error": "Database error"}, status_code=500)
+        finally:
+            await database.release_db_connection(conn)
+    
+    except Exception as e:
+        logging.exception("Error marking feed articles as read: %s", str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 @app.post("/api/add-feed")
 async def add_feed(request: Request):
     """Add a custom RSS feed to the database"""
@@ -1242,6 +1592,7 @@ async def add_feed(request: Request):
         category_name = body.get("category", "").strip()
         name = body.get("name", "").strip()
         retention_days = body.get("retention_days") # Can be None
+        polling_interval = body.get("polling_interval", 60) # Default to 60 minutes (1 hour)
         
         if not url or not category_name:
             return JSONResponse({"error": "URL and category are required"}, status_code=400)
@@ -1260,17 +1611,34 @@ async def add_feed(request: Request):
 
             result = await conn.execute(
                 """
-                INSERT INTO feeds (name, url, category, "isActive", priority, retention_days)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO feeds (name, url, category, "isActive", priority, retention_days, polling_interval)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
                 ON CONFLICT (url) DO NOTHING;
                 """,
-                feed_name, url, category_name, True, max_priority + 1, retention_days
+                feed_name, url, category_name, True, max_priority + 1, retention_days, polling_interval
             )
             if result == 'INSERT 0 0':
                 return JSONResponse({"error": "Feed with this URL already exists"}, status_code=400)
 
             feed_id = await conn.fetchval("SELECT id FROM feeds WHERE url = $1", url)
             await parse_and_store_rss_feed(feed_id, url, category_name, feed_name)
+            
+            # Schedule the new feed
+            job_id = f"feed_{feed_id}"
+            if scheduler.get_job(job_id):
+                scheduler.remove_job(job_id)
+            
+            scheduler.add_job(
+                fetch_single_feed,
+                'interval',
+                minutes=polling_interval,
+                args=[feed_id, feed_name, url, category_name],
+                id=job_id,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=300
+            )
+            logging.info(f"Scheduled new feed '{feed_name}' (ID: {feed_id}) with {polling_interval} minute interval")
             
             return JSONResponse({"message": "Feed added successfully", "category": category_name, "url": url})
 
@@ -1287,6 +1655,12 @@ async def add_feed(request: Request):
 @app.get("/api/article-full-text")
 async def article_full_text(url: str):
     try:
+        # Check cache first
+        cache_key = cache.generate_cache_key("article_full_text", url=url)
+        cached_result = cache.get_from_cache(cache_key)
+        if cached_result is not None:
+            return cached_result
+        
         conn = await get_db_connection()
         content_html = await conn.fetchval('SELECT content FROM articles WHERE link = $1', url)
         await database.release_db_connection(conn)
@@ -1304,9 +1678,13 @@ async def article_full_text(url: str):
         if content_html:
             # Format the article content for consistent, readable display
             formatted_content = format_article_content(content_html)
-            return JSONResponse({"content": formatted_content})
+            result = JSONResponse({"content": formatted_content})
         else:
-            return JSONResponse({"content": "<p>No content could be extracted.</p>"})
+            result = JSONResponse({"content": "<p>No content could be extracted.</p>"})
+        
+        # Cache the result
+        cache.set_in_cache(cache_key, result)
+        return result
 
     except Exception as e:
         logging.exception(f"Error fetching full text for {url}: {e}")
@@ -1335,16 +1713,35 @@ async def update_feed(feed_id: int, request: Request):
         category = body.get("category")
         priority = body.get("priority")
         retention_days = body.get("retention_days") # Can be None
+        polling_interval = body.get("polling_interval", 60) # Default to 60 minutes (1 hour)
 
         if not all([name, url, category]):
             raise HTTPException(status_code=400, detail="Name, URL, and category are required.")
 
         conn = await get_db_connection()
         await conn.execute(
-            'UPDATE feeds SET name = $1, url = $2, category = $3, priority = $4, retention_days = $5 WHERE id = $6',
-            name, url, category, priority, retention_days, feed_id
+            'UPDATE feeds SET name = $1, url = $2, category = $3, priority = $4, retention_days = $5, polling_interval = $6 WHERE id = $7',
+            name, url, category, priority, retention_days, polling_interval, feed_id
         )
         await database.release_db_connection(conn)
+        
+        # Reschedule the feed with new interval
+        job_id = f"feed_{feed_id}"
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+        
+        scheduler.add_job(
+            fetch_single_feed,
+            'interval',
+            minutes=polling_interval,
+            args=[feed_id, name, url, category],
+            id=job_id,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300
+        )
+        logging.info(f"Rescheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
+        
         return JSONResponse({"message": "Feed updated successfully."})
     except Exception as e:
         logging.error(f"Error updating feed: {e}")
@@ -1355,8 +1752,15 @@ async def delete_feed(feed_id: int):
     """Delete a feed."""
     try:
         conn = await get_db_connection()
-        await conn.execute('DELETE FROM feeds WHERE id = $1', (feed_id,))
+        await conn.execute('DELETE FROM feeds WHERE id = $1', feed_id)
         await database.release_db_connection(conn)
+        
+        # Remove the scheduled job for this feed
+        job_id = f"feed_{feed_id}"
+        if scheduler.get_job(job_id):
+            scheduler.remove_job(job_id)
+            logging.info(f"Removed scheduled job for deleted feed ID: {feed_id}")
+        
         return JSONResponse({"message": "Feed deleted successfully."})
     except Exception as e:
         logging.error(f"Error deleting feed: {e}")
@@ -1368,7 +1772,7 @@ async def get_settings():
     conn = await get_db_connection()
     rows = await conn.fetch("SELECT key, value FROM user_settings")
     settings = {row['key']: row['value'] for row in rows}
-    await conn.close()
+    await database.release_db_connection(conn)
     return JSONResponse(content=settings)
 
 @app.put("/api/settings")
@@ -1393,20 +1797,63 @@ async def update_settings(request: Request):
 
 @app.get("/api/categories")
 async def get_categories():
-    """Get all categories, ordered by priority."""
+    """Get all categories with article counts, ordered by priority."""
+    # Check cache first
+    cache_key = cache.generate_cache_key("categories")
+    cached_result = cache.get_from_cache(cache_key)
+    if cached_result is not None:
+        return cached_result
+    
     conn = await get_db_connection()
-    rows = await conn.fetch("SELECT id, name, priority, is_default, ntfy_enabled, ai_prompt, ai_enabled FROM categories ORDER BY priority")
-    categories = [{
-        "id": row['id'], 
-        "name": row['name'], 
-        "priority": row['priority'], 
-        "is_default": row['is_default'], 
-        "ntfy_enabled": row['ntfy_enabled'],
-        "ai_prompt": row['ai_prompt'],
-        "ai_enabled": row['ai_enabled']
-    } for row in rows]
-    await conn.close()
-    return JSONResponse(content=categories)
+    rows = await conn.fetch("SELECT id, name, priority, is_default, ntfy_enabled, telegram_enabled, telegram_chat_id, ai_prompt, ai_enabled FROM categories ORDER BY priority")
+    
+    # Get article counts for each category (last 7 days)
+    threshold = datetime.now(IST) - timedelta(days=7)
+    
+    categories = []
+    for row in rows:
+        category_name = row['name']
+        
+        # Get total articles count
+        total_count = await conn.fetchval(
+            'SELECT COUNT(*) FROM articles WHERE category = $1 AND published_datetime > $2',
+            category_name, threshold
+        )
+        
+        # Get unread articles count (articles not in user_article_status or is_read = false)
+        unread_count = await conn.fetchval(
+            '''
+            SELECT COUNT(*) 
+            FROM articles a
+            LEFT JOIN user_article_status uas ON a.link = uas.article_link
+            WHERE a.category = $1 
+            AND a.published_datetime > $2
+            AND (uas.is_read IS NULL OR uas.is_read = false)
+            ''',
+            category_name, threshold
+        )
+        
+        categories.append({
+            "id": row['id'], 
+            "name": row['name'], 
+            "priority": row['priority'], 
+            "is_default": row['is_default'], 
+            "ntfy_enabled": row['ntfy_enabled'],
+            "telegram_enabled": row['telegram_enabled'],
+            "telegram_chat_id": row['telegram_chat_id'],
+            "ai_prompt": row['ai_prompt'],
+            "ai_enabled": row['ai_enabled'],
+            "unread_count": unread_count,
+            "total_count": total_count
+        })
+        
+        logging.info(f"[Categories] {category_name}: unread={unread_count}, total={total_count}")
+    
+    await database.release_db_connection(conn)
+    
+    result = JSONResponse(content=categories)
+    cache.set_in_cache(cache_key, result)
+    return result
 
 @app.put("/api/categories/order")
 async def update_category_order(request: Request):
@@ -1449,6 +1896,68 @@ async def toggle_category_ntfy(category_id: int, request: Request):
         return JSONResponse({"message": f"Ntfy notifications {'enabled' if ntfy_enabled else 'disabled'} for category."})
     except Exception as e:
         logging.error(f"Error toggling category ntfy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/category/{category_id}/telegram")
+async def update_category_telegram(category_id: int, request: Request):
+    """Update telegram notifications settings for a category."""
+    try:
+        body = await request.json()
+        telegram_enabled = body.get("telegram_enabled", False)
+        telegram_chat_id = body.get("telegram_chat_id", None)
+        
+        conn = await get_db_connection()
+        await conn.execute(
+            "UPDATE categories SET telegram_enabled = $1, telegram_chat_id = $2 WHERE id = $3", 
+            telegram_enabled, telegram_chat_id, category_id
+        )
+        await database.release_db_connection(conn)
+        
+        return JSONResponse({"message": f"Telegram notifications {'enabled' if telegram_enabled else 'disabled'} for category."})
+    except Exception as e:
+        logging.error(f"Error updating category telegram settings: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/category/{category_id}/name")
+async def update_category_name(category_id: int, request: Request):
+    """Update a category's name."""
+    try:
+        body = await request.json()
+        new_name = body.get("name", "").strip()
+        
+        if not new_name:
+            return JSONResponse({"error": "Category name is required"}, status_code=400)
+        
+        conn = await get_db_connection()
+        
+        # Get old category name
+        old_name_row = await conn.fetchrow("SELECT name FROM categories WHERE id = $1", category_id)
+        if not old_name_row:
+            await database.release_db_connection(conn)
+            raise HTTPException(status_code=404, detail="Category not found")
+        
+        old_name = old_name_row['name']
+        
+        # Check if new name already exists (for a different category)
+        existing = await conn.fetchval("SELECT id FROM categories WHERE name = $1 AND id != $2", new_name, category_id)
+        if existing:
+            await database.release_db_connection(conn)
+            return JSONResponse({"error": "A category with this name already exists"}, status_code=400)
+        
+        # Update category name
+        await conn.execute("UPDATE categories SET name = $1 WHERE id = $2", new_name, category_id)
+        
+        # Update all feeds and articles with this category
+        await conn.execute("UPDATE feeds SET category = $1 WHERE category = $2", new_name, old_name)
+        await conn.execute("UPDATE articles SET category = $1 WHERE category = $2", new_name, old_name)
+        
+        await database.release_db_connection(conn)
+        
+        return JSONResponse({"message": f"Category renamed from '{old_name}' to '{new_name}'"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error updating category name: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/category/{category_id}")
@@ -1576,7 +2085,7 @@ async def feeds_column(request: Request):
     conn = await get_db_connection()
     categories_rows = await conn.fetch("SELECT name FROM categories ORDER BY priority")
     categories = [row['name'] for row in categories_rows]
-    await conn.close()
+    await database.release_db_connection(conn)
 
     categories_list = []
     for category in categories:
@@ -1588,21 +2097,6 @@ async def feeds_column(request: Request):
 async def home(request: Request):
     return templates.TemplateResponse("home.html", {"request": request})
 
-#######trends###########################################################################################
-
-@app.get("/api/trends")
-async def trends(source: str = "reddit"):
-    feeds = RSS_FEED_URLS.get(source, [])
-    channels = []
-    for feed in feeds:
-        items = await parse_rss_feed(feed["url"], feed["name"])
-        channels.append({"name": feed["name"], "feed_items": items})
-
-    response_data = {"source": source, "channels": channels}
-    if source == "twitter":
-        response_data["nitter_url"] = Config.NITTER_URL
-
-    return JSONResponse(content=response_data)
 
 
 # ===================== Keyword/Topic Filter Endpoints =====================
