@@ -19,6 +19,9 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Copy your FastAPI application code
 COPY . .
 
+# Make worker script executable
+RUN chmod +x /app/start_workers.sh
+
 # Expose FastAPI port
 EXPOSE 8321
 
