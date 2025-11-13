@@ -21,3 +21,4 @@ nest_asyncio
 markdown-it-py
 rapidfuzz
 redis
+rq>=1.15.1

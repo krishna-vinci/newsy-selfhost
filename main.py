@@ -34,6 +34,8 @@ import asyncpg
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
 from datetime import datetime, timedelta
+from rq import Queue
+from redis import Redis
 
 import logging
 import asyncio
@@ -553,43 +555,44 @@ async def fetch_all_feeds_db():
         logging.info("Feed update completed at %s", end_time)
 
 
-async def schedule_all_feeds():
-    """Schedule individual jobs for each active feed based on their polling_interval"""
-    conn = await get_db_connection()
-    
-    try:
-        active_feeds = await conn.fetch('SELECT id, name, url, category, polling_interval FROM feeds WHERE "isActive" = true')
-        
-        for feed in active_feeds:
-            feed_id = feed['id']
-            name = feed['name']
-            url = feed['url']
-            category = feed['category']
-            polling_interval = feed['polling_interval'] or 1  # Default to 1 minute if None
-            
-            # Create unique job ID for this feed
-            job_id = f"feed_{feed_id}"
-            
-            # Remove existing job if it exists
-            if scheduler.get_job(job_id):
-                scheduler.remove_job(job_id)
-            
-            # Schedule the feed with its custom interval
-            scheduler.add_job(
-                fetch_single_feed,
-                'interval',
-                minutes=polling_interval,
-                args=[feed_id, name, url, category],
-                id=job_id,
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=300
-            )
-            
-            logging.info(f"Scheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
-    
-    finally:
-        await database.release_db_connection(conn)
+# ===== OLD SCHEDULING FUNCTIONS (DEPRECATED - Kept for reference/rollback) =====
+# async def schedule_all_feeds():
+#     """Schedule individual jobs for each active feed based on their polling_interval"""
+#     conn = await get_db_connection()
+#     
+#     try:
+#         active_feeds = await conn.fetch('SELECT id, name, url, category, polling_interval FROM feeds WHERE "isActive" = true')
+#         
+#         for feed in active_feeds:
+#             feed_id = feed['id']
+#             name = feed['name']
+#             url = feed['url']
+#             category = feed['category']
+#             polling_interval = feed['polling_interval'] or 1  # Default to 1 minute if None
+#             
+#             # Create unique job ID for this feed
+#             job_id = f"feed_{feed_id}"
+#             
+#             # Remove existing job if it exists
+#             if scheduler.get_job(job_id):
+#                 scheduler.remove_job(job_id)
+#             
+#             # Schedule the feed with its custom interval
+#             scheduler.add_job(
+#                 fetch_single_feed,
+#                 'interval',
+#                 minutes=polling_interval,
+#                 args=[feed_id, name, url, category],
+#                 id=job_id,
+#                 max_instances=1,
+#                 coalesce=True,
+#                 misfire_grace_time=300
+#             )
+#             
+#             logging.info(f"Scheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
+#     
+#     finally:
+#         await database.release_db_connection(conn)
 
 
 async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None, feed_url: str = None):
@@ -866,16 +869,97 @@ async def cleanup_old_articles():
         logging.info("Finished scheduled cleanup of old articles.")
 
 
+async def enqueue_due_feeds():
+    """
+    Batch scheduler job: Query for feeds due for refresh and enqueue them to Redis queue.
+    This replaces the per-feed scheduling approach with a scalable batch model.
+    Runs every 1 minute.
+    """
+    global feed_queue
+    
+    if not feed_queue:
+        logging.warning("Feed queue not initialized, skipping enqueue")
+        return
+    
+    try:
+        logging.debug("Checking for due feeds...")
+        conn = await database.get_db_connection()
+        
+        # Query for feeds that are due for refresh
+        due_feeds = await conn.fetch("""
+            SELECT id, name, url, category, polling_interval, etag_header, last_modified_header
+            FROM feeds
+            WHERE "isActive" = true 
+            AND next_check_at <= NOW()
+            ORDER BY next_check_at ASC
+            LIMIT 100
+        """)
+        
+        if not due_feeds:
+            logging.debug("No feeds due for refresh")
+            await database.release_db_connection(conn)
+            return
+        
+        logging.info(f"Found {len(due_feeds)} feeds due for refresh")
+        
+        # Import worker function
+        from worker import process_feed_job
+        
+        # Enqueue each due feed
+        for feed in due_feeds:
+            feed_id = feed['id']
+            name = feed['name']
+            url = feed['url']
+            category = feed['category']
+            polling_interval = feed['polling_interval'] or 60
+            etag = feed['etag_header']
+            last_modified = feed['last_modified_header']
+            
+            # Enqueue job to Redis
+            job = feed_queue.enqueue(
+                process_feed_job,
+                feed_id=feed_id,
+                name=name,
+                url=url,
+                category=category,
+                polling_interval=polling_interval,
+                etag=etag,
+                last_modified=last_modified,
+                job_timeout='10m',  # 10 minute timeout per feed
+                job_id=f"feed_{feed_id}_{int(datetime.now().timestamp())}",  # Unique job ID
+                failure_ttl=86400  # Keep failed jobs for 24 hours
+            )
+            
+            # Immediately update next_check_at to prevent duplicate queueing
+            next_check = datetime.now(IST) + timedelta(minutes=polling_interval)
+            await conn.execute(
+                "UPDATE feeds SET next_check_at = $1 WHERE id = $2",
+                next_check, feed_id
+            )
+            
+            logging.debug(f"Enqueued feed {name} (ID: {feed_id}), job ID: {job.id}")
+        
+        await database.release_db_connection(conn)
+        logging.info(f"Successfully enqueued {len(due_feeds)} feeds")
+        
+    except Exception as e:
+        logging.exception(f"Error in enqueue_due_feeds: {e}")
+
+
 scheduler = AsyncIOScheduler(timezone=IST)
 
 # Global Redis client for search index
 redis_client = None
 
+# RQ Redis connection and queue for feed processing
+rq_redis = None
+feed_queue = None
+
 @app.on_event("startup")
 async def startup_event():
-    global redis_client
+    global redis_client, rq_redis, feed_queue
     
-    # Initialize Redis client
+    # Initialize Redis client for caching
     redis_client = aioredis.from_url(
         f"redis://{Config.REDIS_HOST}:{Config.REDIS_PORT}/{Config.REDIS_DB}",
         encoding="utf-8",
@@ -885,6 +969,16 @@ async def startup_event():
     # Initialize FastAPI Cache with Redis backend
     FastAPICache.init(RedisBackend(redis_client), prefix="fastapi-cache")
     
+    # Initialize RQ Redis connection for job queue
+    rq_redis = Redis(
+        host=Config.REDIS_HOST,
+        port=Config.REDIS_PORT,
+        db=Config.REDIS_DB,
+        decode_responses=False  # RQ handles encoding
+    )
+    feed_queue = Queue('feed-queue', connection=rq_redis)
+    logging.info(f"RQ feed queue initialized: {len(feed_queue)} jobs pending")
+    
     # Initialize database connection pool
     await database.init_db_pool()
     await init_db()
@@ -892,28 +986,112 @@ async def startup_event():
     # Initialize reports database
     await reports.init_reports_db()
     
-    # Run the first feed fetch in the background immediately on startup
-    asyncio.create_task(fetch_all_feeds_db())
     # Build initial search index
     asyncio.create_task(build_search_index())
     
-    # Schedule individual feeds with their custom polling intervals
-    await schedule_all_feeds()
+    # ===== NEW SCALABLE ARCHITECTURE =====
+    # Single batch scheduler job runs every minute to enqueue due feeds
+    scheduler.add_job(enqueue_due_feeds, 'interval', minutes=1, id='batch_feed_scheduler')
+    logging.info("Batch feed scheduler initialized (runs every 1 minute)")
     
+    # Other scheduled jobs
     scheduler.add_job(cleanup_old_articles, 'cron', hour=0)  # Run daily at midnight
     scheduler.add_job(build_search_index, 'interval', minutes=5)  # Update search index every 5 minutes
     scheduler.start()
     
     # Load and schedule reports
     await reports.load_and_schedule_reports(scheduler)
+    
+    # Trigger initial feed enqueue
+    asyncio.create_task(enqueue_due_feeds())
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global redis_client
+    global redis_client, rq_redis
     if redis_client:
         await redis_client.close()
+    if rq_redis:
+        rq_redis.close()
     # Close database pool
     await database.close_db_pool()
+
+
+# --- Queue Monitoring Endpoint ---
+@app.get("/api/queue/status")
+async def get_queue_status():
+    """Monitor RQ job queue status for debugging and health checks."""
+    global feed_queue
+    
+    if not feed_queue:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Queue not initialized"}
+        )
+    
+    try:
+        from rq import Worker
+        from rq.registry import (
+            StartedJobRegistry,
+            FinishedJobRegistry, 
+            FailedJobRegistry,
+            ScheduledJobRegistry
+        )
+        
+        # Get queue stats
+        queued_count = len(feed_queue)
+        
+        # Get worker count
+        workers = Worker.all(connection=rq_redis)
+        # Filter for active workers (check state instead of stopped attribute)
+        active_workers = [w for w in workers if w.state in ['busy', 'idle']]
+        
+        # Get job registries
+        started_registry = StartedJobRegistry('feed-queue', connection=rq_redis)
+        finished_registry = FinishedJobRegistry('feed-queue', connection=rq_redis)
+        failed_registry = FailedJobRegistry('feed-queue', connection=rq_redis)
+        scheduled_registry = ScheduledJobRegistry('feed-queue', connection=rq_redis)
+        
+        # Get next feeds due for refresh
+        conn = await database.get_db_connection()
+        next_due_feeds = await conn.fetch("""
+            SELECT id, name, next_check_at
+            FROM feeds
+            WHERE "isActive" = true AND next_check_at <= NOW() + INTERVAL '5 minutes'
+            ORDER BY next_check_at ASC
+            LIMIT 10
+        """)
+        await database.release_db_connection(conn)
+        
+        return {
+            "queue": {
+                "queued_jobs": queued_count,
+                "started_jobs": len(started_registry),
+                "finished_jobs": len(finished_registry),
+                "failed_jobs": len(failed_registry),
+                "scheduled_jobs": len(scheduled_registry)
+            },
+            "workers": {
+                "total": len(workers),
+                "active": len(active_workers),
+                "worker_names": [w.name for w in active_workers]
+            },
+            "next_due_feeds": [
+                {
+                    "id": f['id'],
+                    "name": f['name'],
+                    "next_check_at": f['next_check_at'].isoformat() if f['next_check_at'] else None
+                }
+                for f in next_due_feeds
+            ],
+            "status": "healthy" if len(active_workers) > 0 else "warning"
+        }
+        
+    except Exception as e:
+        logging.exception(f"Error getting queue status: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 
 # --- Search Index Functions ---
