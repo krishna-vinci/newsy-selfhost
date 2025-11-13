@@ -25,6 +25,7 @@ type Feed = {
 	priority: number;
 	retention_days: number | null;
 	polling_interval: number;
+	fetch_full_content?: boolean;
 	unread_count?: number;
 };
 
@@ -99,6 +100,9 @@ let useExistingCategory = $state(true);
 let newFeedRetentionDays = $state<number | undefined>(undefined);
 let newFeedPollingHours = $state(1);
 let newFeedPollingMinutes = $state(0);
+let newFeedFetchFullContent = $state(false);
+let isAddingFeed = $state(false);
+let processingFeedId = $state<number | null>(null);
 
 // Keyword/Topic filter state
 let keywordFilters = $state<any[]>([]);
@@ -125,7 +129,7 @@ const categoryOptions = $derived(
 async function loadFeedConfig() {
 	isLoading = true;
 	try {
-		const response = await fetch('/api/feeds/config');
+		const response = await fetch(`/api/feeds/config?_=${new Date().getTime()}`);
 		if (!response.ok) {
 			throw new Error('Failed to load feed configuration');
 		}
@@ -205,6 +209,7 @@ async function addCustomFeed() {
 		return;
 	}
 
+	isAddingFeed = true;
 	try {
 		const pollingInterval = Math.max(1, newFeedPollingHours * 60 + newFeedPollingMinutes);
 		const response = await fetch('/api/add-feed', {
@@ -215,7 +220,8 @@ async function addCustomFeed() {
 				category: category,
 				name: newFeedName.trim(),
 				retention_days: newFeedRetentionDays,
-				polling_interval: pollingInterval
+				polling_interval: pollingInterval,
+				fetch_full_content: newFeedFetchFullContent
 			})
 		});
 
@@ -224,11 +230,30 @@ async function addCustomFeed() {
 			throw new Error(error.error || 'Failed to add feed');
 		}
 
-		toast.success('Feed added successfully!');
+		const result = await response.json();
+		processingFeedId = result.feed_id || null;
+
+		toast.success(`Feed added! ${result.articles_added || 0} articles from last 10 days`, {
+			description: 'Articles are now available',
+			duration: 5000
+		});
+		
 		resetAddFeedForm();
+		
+		// Reload feed config immediately
 		await loadFeedConfig();
+		
+		// Auto-refresh after 3 seconds to show fetched articles
+		setTimeout(async () => {
+			await loadFeedConfig();
+			processingFeedId = null;
+		}, 3000);
+		
 	} catch (error) {
 		toast.error(error instanceof Error ? error.message : 'Failed to add feed');
+		processingFeedId = null;
+	} finally {
+		isAddingFeed = false;
 	}
 }
 
@@ -242,6 +267,7 @@ function resetAddFeedForm() {
 	newFeedRetentionDays = undefined;
 	newFeedPollingHours = 1;
 	newFeedPollingMinutes = 0;
+	newFeedFetchFullContent = false;
 }
 
 // Edit/Delete Functions
@@ -274,7 +300,8 @@ async function updateFeed() {
 				category: editingFeedCategory,
 				priority: editingFeed.priority,
 				retention_days: editingFeed.retention_days,
-				polling_interval: editingFeed.polling_interval
+				polling_interval: editingFeed.polling_interval,
+				fetch_full_content: editingFeed.fetch_full_content || false
 			})
 		});
 
@@ -987,6 +1014,16 @@ $effect(() => {
 						</div>
 					</div>
 
+					<div class="flex items-center gap-2">
+						<Checkbox
+							bind:checked={newFeedFetchFullContent}
+							id="fetch-full-content"
+						/>
+						<label for="fetch-full-content" class="text-xs cursor-pointer">
+							Fetch full article content (slower)
+						</label>
+					</div>
+
 					<div class="flex gap-2 text-xs">
 						<label class="flex items-center gap-1 cursor-pointer">
 							<input
@@ -1034,20 +1071,33 @@ $effect(() => {
 				<div class="flex gap-2">
 					<Button
 						onclick={addCustomFeed}
+						disabled={isAddingFeed}
 						size="sm"
 						class="flex-1"
 					>
-						Add
+						{#if isAddingFeed}
+							<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+							Processing...
+						{:else}
+							Add
+						{/if}
 					</Button>
 					<Button
 						onclick={resetAddFeedForm}
 						variant="outline"
 						size="sm"
 						class="flex-1"
+						disabled={isAddingFeed}
 					>
 						Cancel
 					</Button>
 				</div>
+				{#if processingFeedId}
+					<div class="flex items-center gap-2 p-2 bg-green-500/10 text-green-500 rounded text-xs">
+						<CheckCircle class="h-3 w-3" />
+						<span>Feed added successfully!</span>
+					</div>
+				{/if}
 			</div>
 		{/if}
 	</Sidebar.Footer>
@@ -1133,6 +1183,15 @@ $effect(() => {
 							{/each}
 						</Select.Content>
 					</Select.Root>
+				</div>
+				<div class="flex items-center gap-2">
+					<Checkbox
+						bind:checked={editingFeed.fetch_full_content}
+						id="edit-fetch-full-content"
+					/>
+					<label for="edit-fetch-full-content" class="text-sm cursor-pointer">
+						Fetch full article content (slower)
+					</label>
 				</div>
 			</div>
 			<div class="mt-6 flex justify-between gap-2">

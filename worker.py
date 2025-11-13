@@ -283,14 +283,17 @@ async def fetch_feed_with_caching(feed_id: int, url: str, etag: str = None, last
 
 
 async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, source_name: str, 
-                                   etag: str = None, last_modified: str = None):
+                                   etag: str = None, last_modified: str = None, fetch_full_content: bool = False):
     """
     Parse and store RSS feed articles with HTTP caching support.
+    
+    Args:
+        fetch_full_content: If True, extract full article content using newspaper. If False, only store feed summary.
     
     Returns:
         tuple: (new_etag, new_last_modified, articles_added)
     """
-    logger.info(f"Processing feed: {source_name} (ID: {feed_id})")
+    logger.info(f"Processing feed: {source_name} (ID: {feed_id}), full_content={fetch_full_content}")
     
     try:
         # Fetch feed with caching
@@ -306,11 +309,12 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
         feed = feedparser.parse(content)
         
         last_update = await get_feed_last_update(rss_url)
-        threshold = last_update if last_update else datetime.now(IST) - timedelta(days=3)
+        threshold = last_update if last_update else datetime.now(IST) - timedelta(days=10)
         new_last_update = last_update or threshold
         
         conn = await database.get_db_connection()
         articles_added = 0
+        new_articles = []  # For batched notifications
         
         try:
             for entry in feed.entries:
@@ -351,15 +355,18 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 if await conn.fetchval('SELECT id FROM articles WHERE link = $1', link):
                     continue
                 
-                # Extract full article content
-                try:
-                    art = Article(link, keep_article_html=True)
-                    art.download()
-                    art.parse()
-                    article_content = art.article_html or art.text
-                except Exception as e:
-                    logger.warning(f"Error extracting content for {link}: {e}")
-                    article_content = None
+                # Conditionally extract full article content based on fetch_full_content flag
+                article_content = None
+                if fetch_full_content:
+                    try:
+                        art = Article(link, keep_article_html=True)
+                        art.download()
+                        art.parse()
+                        article_content = art.article_html or art.text
+                        logger.debug(f"Extracted full content for: {title}")
+                    except Exception as e:
+                        logger.warning(f"Error extracting content for {link}: {e}")
+                        article_content = None
                 
                 # Insert article and get its ID
                 article_id = await conn.fetchval(
@@ -373,6 +380,14 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 
                 articles_added += 1
                 logger.info(f"Added article: {title}")
+                
+                # Add to new articles list for batched notification
+                new_articles.append({
+                    'title': title,
+                    'link': link,
+                    'description': description,
+                    'thumbnail': thumbnail_url
+                })
                 
                 # Process with AI filter if enabled for this category
                 try:
@@ -388,10 +403,20 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                     )
                 except Exception as e:
                     logger.warning(f"Keyword filter processing failed for article {article_id}: {e}")
-                
-                # Send notifications
-                await send_ntfy_notification(title, link, description, category, source_name)
-                await send_telegram_notification(title, link, description, category, source_name, thumbnail_url)
+            
+            # Send batched notifications after processing all articles
+            if new_articles:
+                try:
+                    # Send single consolidated notification
+                    batch_title = f"{source_name}: {len(new_articles)} new article{'s' if len(new_articles) > 1 else ''}"
+                    batch_description = f"Latest: {new_articles[0]['title']}"
+                    batch_link = new_articles[0]['link']
+                    
+                    await send_ntfy_notification(batch_title, batch_link, batch_description, category, source_name)
+                    await send_telegram_notification(batch_title, batch_link, batch_description, category, source_name, new_articles[0]['thumbnail'])
+                    logger.info(f"Sent batched notification for {len(new_articles)} articles from {source_name}")
+                except Exception as e:
+                    logger.error(f"Error sending batched notifications: {e}")
             
             # Update feed state
             if new_last_update > threshold:
@@ -413,7 +438,7 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
 
 
 def process_feed_job(feed_id: int, name: str, url: str, category: str, 
-                     polling_interval: int, etag: str = None, last_modified: str = None):
+                     polling_interval: int, etag: str = None, last_modified: str = None, fetch_full_content: bool = False):
     """
     RQ job function to process a single feed.
     This is the main entry point called by RQ workers.
@@ -426,6 +451,7 @@ def process_feed_job(feed_id: int, name: str, url: str, category: str,
         polling_interval: Polling interval in minutes
         etag: Current ETag header value
         last_modified: Current Last-Modified header value
+        fetch_full_content: Whether to extract full article content
     """
     logger.info(f"Starting job for feed: {name} (ID: {feed_id})")
     start_time = datetime.now(IST)
@@ -441,7 +467,7 @@ def process_feed_job(feed_id: int, name: str, url: str, category: str,
             
             # Process feed
             new_etag, new_last_modified, articles_added = loop.run_until_complete(
-                parse_and_store_rss_feed(feed_id, url, category, name, etag, last_modified)
+                parse_and_store_rss_feed(feed_id, url, category, name, etag, last_modified, fetch_full_content)
             )
             
             # Update feed metadata in database
