@@ -234,24 +234,24 @@ $effect(() => {
 	<!-- Main Content -->
 	<Sidebar.Inset class="h-full">
 		<div class="w-full h-full overflow-auto">
-			<div class="px-8 py-8">
+			<div class="px-4 py-4 sm:px-6 sm:py-6 md:px-8 md:py-8">
 				<!-- Header -->
-				<div class="mb-8 flex items-center justify-between">
+				<div class="mb-6 md:mb-8 flex flex-wrap items-center justify-between gap-3">
 					<div class="flex items-center gap-2">
 						<Sidebar.Trigger />
-						<h1 class="text-2xl font-bold">Reports Dashboard</h1>
+						<h1 class="text-xl sm:text-2xl font-bold">Reports Dashboard</h1>
 					</div>
 				</div>
 
-				<div class="grid gap-8">
+				<div class="grid gap-6 md:gap-8">
 				<!-- Schedule Manager Section -->
-				<Card class="p-6">
-					<div class="flex items-center justify-between mb-6">
+				<Card class="p-4 sm:p-6">
+					<div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-6">
 						<div>
 							<h2 class="text-xl font-semibold">Report Schedules</h2>
 							<p class="text-sm text-muted-foreground">Manage automated daily and weekly reports</p>
 						</div>
-						<Button onclick={() => createDialogOpen = true}>
+						<Button onclick={() => createDialogOpen = true} class="w-full sm:w-auto">
 							<Plus class="size-4 mr-2" />
 							New Schedule
 						</Button>
@@ -269,6 +269,7 @@ $effect(() => {
 							</Button>
 						</div>
 					{:else}
+						<div class="overflow-x-auto -mx-4 sm:mx-0">
 						<Table.Root>
 							<Table.Header>
 								<Table.Row>
@@ -318,11 +319,12 @@ $effect(() => {
 								{/each}
 							</Table.Body>
 						</Table.Root>
+						</div>
 					{/if}
 				</Card>
 
 				<!-- Generated Reports Section -->
-				<Card class="p-6">
+				<Card class="p-4 sm:p-6">
 					<div class="mb-6">
 						<h2 class="text-xl font-semibold">Generated Reports</h2>
 						<p class="text-sm text-muted-foreground">Download your markdown reports</p>
@@ -336,6 +338,7 @@ $effect(() => {
 							<p class="text-sm text-muted-foreground">Generate reports from the Feeds page or wait for scheduled reports</p>
 						</div>
 					{:else}
+						<div class="overflow-x-auto -mx-4 sm:mx-0">
 						<Table.Root>
 							<Table.Header>
 								<Table.Row>
@@ -374,6 +377,7 @@ $effect(() => {
 								{/each}
 							</Table.Body>
 						</Table.Root>
+						</div>
 					{/if}
 				</Card>
 			</div>
@@ -385,7 +389,7 @@ $effect(() => {
 
 <!-- Create Schedule Dialog -->
 <Dialog.Root bind:open={createDialogOpen}>
-<Dialog.Content class="sm:max-w-md">
+<Dialog.Content class="max-w-[95vw] sm:max-w-md max-h-[90vh] overflow-y-auto">
 	<Dialog.Header>
 		<Dialog.Title>Create Report Schedule</Dialog.Title>
 		<Dialog.Description>Set up an automated schedule to generate reports for a category</Dialog.Description>

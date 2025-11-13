@@ -888,13 +888,13 @@ onDestroy(() => {
 <!-- Main Content -->
 <Sidebar.Inset class="h-full">
 <div class="w-full h-full overflow-auto">
-<div class="px-8 py-8">
+<div class="px-4 py-4 sm:px-6 sm:py-6 md:px-8 md:py-8">
 <!-- Header -->
-<div class="mb-8 flex flex-col gap-4">
-	<div class="flex items-center justify-between gap-4">
+<div class="mb-6 md:mb-8 flex flex-col gap-3 md:gap-4">
+	<div class="flex flex-wrap items-center justify-between gap-3 md:gap-4">
 		<div class="flex items-center gap-2 min-w-0">
 			<Sidebar.Trigger />
-			<h1 class="text-2xl font-bold truncate">
+			<h1 class="text-xl sm:text-2xl font-bold truncate">
 				{selectedFeedUrl && selectedFeedName ? selectedFeedName : (selectedCategory === 'all' ? 'All Feeds' : selectedCategory)}
 			</h1>
 			{#if isSearchMode && searchQuery}
@@ -904,7 +904,7 @@ onDestroy(() => {
 			{/if}
 		</div>
 
-		<div class="flex items-center gap-3 shrink-0">
+		<div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full md:w-auto md:shrink-0">
 			<!-- New Articles Indicator -->
 			{#if newArticlesCount > 0}
 				<Button
@@ -919,7 +919,7 @@ onDestroy(() => {
 			{/if}
 			
 			<!-- Search Input -->
-			<div class="relative w-64">
+			<div class="relative w-full md:w-64 order-first md:order-none">
 				<Search class="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
 				<Input
 					type="text"
@@ -949,6 +949,7 @@ onDestroy(() => {
 					onclick={generateStarredReport}
 					disabled={isGeneratingReport}
 					aria-label="Generate starred report"
+					class="hidden sm:flex"
 				>
 					<FileText class="size-4 mr-2" />
 					{isGeneratingReport ? 'Generating...' : 'Generate Report'}
@@ -1058,7 +1059,7 @@ onDestroy(() => {
 		</div>
 	{:else if viewMode === 'card'}
 		<!-- Card View -->
-		<div class="grid gap-6 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">
+		<div class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 sm:gap-6">
 			{#each filteredArticles as article}
 				<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg {article.is_read ? 'opacity-60' : ''}">
 					<div class="flex flex-grow flex-col gap-4">
@@ -1085,7 +1086,7 @@ onDestroy(() => {
 									<p class="mt-1 line-clamp-3 text-sm text-muted-foreground">{article.description}</p>
 								{/if}
 							</div>
-							<div class="flex justify-end gap-2">
+							<div class="flex flex-wrap justify-end gap-2">
 								<Button
 									variant="outline"
 									size="icon-sm"
@@ -1161,7 +1162,7 @@ onDestroy(() => {
 								<span>{formatPublishedDate(article.published_datetime, timezone)}</span>
 							</div>
 						</div>
-						<div class="flex shrink-0 gap-2">
+						<div class="flex flex-wrap shrink-0 gap-2">
 							<Button
 								variant="ghost"
 								size="icon-sm"
@@ -1224,14 +1225,20 @@ onDestroy(() => {
 		</div>
 	{:else if viewMode === 'column'}
 		<!-- Column View -->
-		<div class="grid gap-6 lg:grid-cols-2">
+		<div class="flex flex-col gap-6 lg:grid lg:grid-cols-2">
 			<!-- Article List -->
 			<div class="flex flex-col gap-2">
 				{#each filteredArticles as article, index}
 					<Card
 						id={`article-column-${index}`}
-						class="group cursor-pointer transition-all {selectedColumnIndex === index ? 'ring-2 ring-primary' : 'hover:shadow-md'} {article.is_read ? 'opacity-60' : ''}"
+						class="group cursor-pointer transition-all {selectedColumnIndex === index ? 'ring-2 ring-primary lg:ring-2' : 'hover:shadow-md'} {article.is_read ? 'opacity-60' : ''}"
 						onclick={() => {
+							// On mobile, open article in modal instead of side-by-side
+							if (window.innerWidth < 1024) {
+								openArticleModal(article);
+								return;
+							}
+							
 							// Mark previous article as read when switching
 							if (selectedColumnIndex !== index && filteredArticles[selectedColumnIndex]) {
 								const previousArticleLink = filteredArticles[selectedColumnIndex].link;
@@ -1252,10 +1259,10 @@ onDestroy(() => {
 					>
 						<div class="flex items-start gap-4 px-6 py-4">
 							{#if article.thumbnail}
-								<img
-									src={article.thumbnail}
-									alt={article.title}
-									class="h-16 w-24 shrink-0 rounded-md object-cover"
+							<img
+								src={article.thumbnail}
+								alt={article.title}
+								class="h-12 w-16 sm:h-16 sm:w-24 shrink-0 rounded-md object-cover"
 									onerror={(e) => {
 										(e.currentTarget as HTMLImageElement).src = '/default-thumbnail.jpg';
 									}}
@@ -1302,7 +1309,7 @@ onDestroy(() => {
 			</div>
 
 			<!-- Article Content -->
-			<div class="sticky top-4 h-fit">
+			<div class="sticky top-4 h-fit hidden lg:block">
 				<Card class="max-h-[80vh] overflow-auto">
 					{#if isLoadingContent}
 						<div class="flex items-center justify-center py-16">
@@ -1318,7 +1325,7 @@ onDestroy(() => {
 										<span class="text-xs text-muted-foreground">{formatPublishedDate(filteredArticles[selectedColumnIndex].published_datetime, timezone)}</span>
 									</div>
 								</div>
-								<div class="flex shrink-0 gap-2">
+								<div class="flex flex-wrap shrink-0 gap-2">
 									<Button
 										variant="outline"
 										size="icon-sm"
@@ -1437,7 +1444,7 @@ onDestroy(() => {
 					<p class="text-muted-foreground">Loading article content...</p>
 				</div>
 			{:else}
-				<div class="prose prose-sm max-w-none dark:prose-invert max-h-[60vh] overflow-auto">
+				<div class="prose prose-sm max-w-none dark:prose-invert max-h-[60vh] sm:max-h-[70vh] overflow-auto">
 					{@html articleContent}
 				</div>
 			{/if}
@@ -1449,7 +1456,7 @@ onDestroy(() => {
 <KeyboardShortcutsDialog bind:open={showShortcutsModal} />
 
 <!-- Floating Help Button -->
-<div class="fixed bottom-8 right-8 z-50">
+<div class="fixed bottom-4 right-4 sm:bottom-8 sm:right-8 z-50">
 	<Button
 		variant="outline"
 		size="icon"
