@@ -257,7 +257,7 @@ async function loadInitialArticles() {
 	const viewParam = `&view=${viewType}`;
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2&limit=${INITIAL_LOAD}&offset=0${categoryParam}${feedParam}${searchParam}${starredParam}${viewParam}`);
+		const response = await fetch(`/api/feeds?limit=${INITIAL_LOAD}&offset=0${categoryParam}${feedParam}${searchParam}${starredParam}${viewParam}`);
 		if (!response.ok) throw new Error('Failed to fetch feeds');
 		
 		const data = await response.json();
@@ -302,7 +302,7 @@ async function loadMoreArticles() {
 	const viewParam = `&view=${viewType}`;
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2&limit=${LOAD_MORE_SIZE}&offset=${currentOffset}${categoryParam}${feedParam}${searchParam}${starredParam}${viewParam}`);
+		const response = await fetch(`/api/feeds?limit=${LOAD_MORE_SIZE}&offset=${currentOffset}${categoryParam}${feedParam}${searchParam}${starredParam}${viewParam}`);
 		if (!response.ok) throw new Error('Failed to fetch more articles');
 		
 		const data = await response.json();
@@ -330,13 +330,15 @@ async function loadMoreArticles() {
 }
 
 async function fetchFeedsData() {
-	const categoryParam = selectedCategory !== 'all' ? `&category=${encodeURIComponent(selectedCategory)}` : '';
-	const searchParam = searchQuery.trim() ? `&q=${encodeURIComponent(searchQuery)}` : '';
-	const starredParam = isStarredViewActive ? '&starred_only=true' : '';
-	const viewParam = `&view=${viewType}`;
+	const categoryParam = selectedCategory !== 'all' ? `category=${encodeURIComponent(selectedCategory)}` : '';
+	const searchParam = searchQuery.trim() ? `q=${encodeURIComponent(searchQuery)}` : '';
+	const starredParam = isStarredViewActive ? 'starred_only=true' : '';
+	const viewParam = `view=${viewType}`;
+	
+	const params = [categoryParam, searchParam, starredParam, viewParam].filter(p => p).join('&');
 	
 	try {
-		const response = await fetch(`/api/feeds?days=2${categoryParam}${searchParam}${starredParam}${viewParam}`);
+		const response = await fetch(`/api/feeds?${params}`);
 		if (!response.ok) throw new Error('Failed to fetch feeds');
 		
 		const results = await response.json();
