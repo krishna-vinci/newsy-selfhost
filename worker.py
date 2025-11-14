@@ -22,6 +22,7 @@ import database
 import ai_filter
 import keyword_filter
 import cache
+from youtube_embed import convert_links_to_embeds
 
 load_dotenv()
 
@@ -367,6 +368,10 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                     except Exception as e:
                         logger.warning(f"Error extracting content for {link}: {e}")
                         article_content = None
+                if description:
+                    description = convert_links_to_embeds(description)
+                if article_content:
+                    article_content = convert_links_to_embeds(article_content)
                 
                 # Insert article and get its ID
                 article_id = await conn.fetchval(

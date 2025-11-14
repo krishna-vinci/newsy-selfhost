@@ -62,6 +62,7 @@ import database  # Import database module
 import ai_filter  # Import AI filtering module
 import keyword_filter  # Import keyword/topic filtering module
 import cache  # Import cache module
+from youtube_embed import convert_links_to_embeds
 
 load_dotenv()  # Load environment variables
 
@@ -1958,6 +1959,12 @@ async def article_full_text(url: str):
         if cached_result is not None:
             return cached_result
         
+        youtube_only_html = convert_links_to_embeds(url)
+        if "youtube-embed-placeholder" in youtube_only_html:
+            result = JSONResponse({"content": youtube_only_html})
+            cache.set_in_cache(cache_key, result)
+            return result
+
         conn = await get_db_connection()
         content_html = await conn.fetchval('SELECT content FROM articles WHERE link = $1', url)
         await database.release_db_connection(conn)
@@ -1973,9 +1980,13 @@ async def article_full_text(url: str):
                 content_html = "<p>" + a.text.replace('\n', '</p><p>') + "</p>"
 
         if content_html:
-            # Format the article content for consistent, readable display
-            formatted_content = format_article_content(content_html)
-            result = JSONResponse({"content": formatted_content})
+            content_html = convert_links_to_embeds(content_html)
+            if "youtube-embed-placeholder" in content_html:
+                result = JSONResponse({"content": content_html})
+            else:
+                # Format the article content for consistent, readable display
+                formatted_content = format_article_content(content_html)
+                result = JSONResponse({"content": formatted_content})
         else:
             result = JSONResponse({"content": "<p>No content could be extracted.</p>"})
         
