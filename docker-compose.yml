@@ -33,6 +33,23 @@ services:
       - newsy_db
       - newsy-redis
 
+  newsy-worker:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - WORKER_COUNT=2  # Number of workers in single container
+    restart: unless-stopped
+    networks:
+      - db-net
+    depends_on:
+      - newsy_db
+      - newsy-redis
+      - newsy-backend
+    command: bash /app/start_workers.sh
+    # Single container running 4 workers (uses ~400MB total)
+    # Alternative: Use deploy.replicas: 4 for separate containers
+
   newsy_db:
     image: postgres:alpine
     environment:

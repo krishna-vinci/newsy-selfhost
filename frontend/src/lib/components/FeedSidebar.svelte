@@ -25,6 +25,7 @@ type Feed = {
 	priority: number;
 	retention_days: number | null;
 	polling_interval: number;
+	fetch_full_content?: boolean;
 	unread_count?: number;
 };
 
@@ -64,7 +65,7 @@ let feedConfig = $state<FeedConfig>({});
 let isLoading = $state(true);
 let isSaving = $state(false);
 let expandedCategories = $state<Set<string>>(new Set()); // Start collapsed
-let showAddFeedForm = $state(false);
+let showAddFeedModal = $state(false);
 
 // Edit feed modal state
 let showEditFeedModal = $state(false);
@@ -99,6 +100,9 @@ let useExistingCategory = $state(true);
 let newFeedRetentionDays = $state<number | undefined>(undefined);
 let newFeedPollingHours = $state(1);
 let newFeedPollingMinutes = $state(0);
+let newFeedFetchFullContent = $state(false);
+let isAddingFeed = $state(false);
+let processingFeedId = $state<number | null>(null);
 
 // Keyword/Topic filter state
 let keywordFilters = $state<any[]>([]);
@@ -125,7 +129,7 @@ const categoryOptions = $derived(
 async function loadFeedConfig() {
 	isLoading = true;
 	try {
-		const response = await fetch('/api/feeds/config');
+		const response = await fetch(`/api/feeds/config?_=${new Date().getTime()}`);
 		if (!response.ok) {
 			throw new Error('Failed to load feed configuration');
 		}
@@ -205,6 +209,7 @@ async function addCustomFeed() {
 		return;
 	}
 
+	isAddingFeed = true;
 	try {
 		const pollingInterval = Math.max(1, newFeedPollingHours * 60 + newFeedPollingMinutes);
 		const response = await fetch('/api/add-feed', {
@@ -215,7 +220,8 @@ async function addCustomFeed() {
 				category: category,
 				name: newFeedName.trim(),
 				retention_days: newFeedRetentionDays,
-				polling_interval: pollingInterval
+				polling_interval: pollingInterval,
+				fetch_full_content: newFeedFetchFullContent
 			})
 		});
 
@@ -224,11 +230,30 @@ async function addCustomFeed() {
 			throw new Error(error.error || 'Failed to add feed');
 		}
 
-		toast.success('Feed added successfully!');
+		const result = await response.json();
+		processingFeedId = result.feed_id || null;
+
+		toast.success(`Feed added! ${result.articles_added || 0} articles from last 10 days`, {
+			description: 'Articles are now available',
+			duration: 5000
+		});
+		
 		resetAddFeedForm();
+		
+		// Reload feed config immediately
 		await loadFeedConfig();
+		
+		// Auto-refresh after 3 seconds to show fetched articles
+		setTimeout(async () => {
+			await loadFeedConfig();
+			processingFeedId = null;
+		}, 3000);
+		
 	} catch (error) {
 		toast.error(error instanceof Error ? error.message : 'Failed to add feed');
+		processingFeedId = null;
+	} finally {
+		isAddingFeed = false;
 	}
 }
 
@@ -238,10 +263,11 @@ function resetAddFeedForm() {
 	selectedCategoryForFeed = '';
 	newCategoryName = '';
 	useExistingCategory = true;
-	showAddFeedForm = false;
+	showAddFeedModal = false;
 	newFeedRetentionDays = undefined;
 	newFeedPollingHours = 1;
 	newFeedPollingMinutes = 0;
+	newFeedFetchFullContent = false;
 }
 
 // Edit/Delete Functions
@@ -274,7 +300,8 @@ async function updateFeed() {
 				category: editingFeedCategory,
 				priority: editingFeed.priority,
 				retention_days: editingFeed.retention_days,
-				polling_interval: editingFeed.polling_interval
+				polling_interval: editingFeed.polling_interval,
+				fetch_full_content: editingFeed.fetch_full_content || false
 			})
 		});
 
@@ -933,123 +960,18 @@ $effect(() => {
 		{/if}
 	</Sidebar.Content>
 
-	<!-- Footer with Add Feed Form -->
+	<!-- Footer with Buttons -->
 	<Sidebar.Footer>
-		{#if !showAddFeedForm}
-			<div class="flex gap-2">
-				<Button onclick={() => (showAddFeedForm = true)} variant="outline" size="sm" class="w-full">
-					<Plus class="mr-2 h-4 w-4" />
-					Add Feed
-				</Button>
-				<Button onclick={openCategorySettings} variant="ghost" size="icon" class="h-9 w-9">
-					<Settings class="h-4 w-4" />
-				</Button>
-			</div>
-		{:else}
-			<div class="space-y-3 p-2">
-				<div class="space-y-2">
-					<Input
-						type="text"
-						placeholder="Feed name"
-						bind:value={newFeedName}
-						class="h-8 text-sm"
-					/>
-					<Input
-						type="url"
-						placeholder="Feed URL"
-						bind:value={newFeedUrl}
-						class="h-8 text-sm"
-					/>
-					<Input
-						type="number"
-						placeholder="Retention days (e.g., 30)"
-						bind:value={newFeedRetentionDays}
-						class="h-8 text-sm"
-					/>
-					<div class="space-y-1">
-						<label class="text-xs font-medium">Polling Interval</label>
-						<div class="flex gap-2 items-center">
-							<Input
-								type="number"
-								placeholder="HH"
-								bind:value={newFeedPollingHours}
-								min="0"
-								class="h-8 text-sm flex-1"
-							/>
-							<span class="text-xs">:</span>
-							<Input
-								type="number"
-								placeholder="MM"
-								bind:value={newFeedPollingMinutes}
-								min="1"
-								class="h-8 text-sm flex-1"
-							/>
-						</div>
-					</div>
-
-					<div class="flex gap-2 text-xs">
-						<label class="flex items-center gap-1 cursor-pointer">
-							<input
-								type="radio"
-								bind:group={useExistingCategory}
-								value={true}
-								class="h-3 w-3"
-							/>
-							<span>Existing</span>
-						</label>
-						<label class="flex items-center gap-1 cursor-pointer">
-							<input
-								type="radio"
-								bind:group={useExistingCategory}
-								value={false}
-								class="h-3 w-3"
-							/>
-							<span>New</span>
-						</label>
-					</div>
-
-					{#if useExistingCategory}
-						<Select.Root type="single" bind:value={selectedCategoryForFeed}>
-							<Select.Trigger class="h-8 text-sm">
-								{categoryOptions.find(opt => opt.value === selectedCategoryForFeed)?.label || 'Select category'}
-							</Select.Trigger>
-							<Select.Content>
-								{#each categoryOptions as option (option.value)}
-									<Select.Item value={option.value} label={option.label}>
-										{option.label}
-									</Select.Item>
-								{/each}
-							</Select.Content>
-						</Select.Root>
-					{:else}
-						<Input
-							type="text"
-							placeholder="New category"
-							bind:value={newCategoryName}
-							class="h-8 text-sm"
-						/>
-					{/if}
-				</div>
-
-				<div class="flex gap-2">
-					<Button
-						onclick={addCustomFeed}
-						size="sm"
-						class="flex-1"
-					>
-						Add
-					</Button>
-					<Button
-						onclick={resetAddFeedForm}
-						variant="outline"
-						size="sm"
-						class="flex-1"
-					>
-						Cancel
-					</Button>
-				</div>
-			</div>
-		{/if}
+		<div class="flex flex-col gap-2">
+			<Button onclick={() => (showAddFeedModal = true)} variant="outline" size="sm" class="w-full">
+				<Plus class="mr-2 h-4 w-4" />
+				Add Feed
+			</Button>
+			<Button onclick={openCategorySettings} variant="outline" size="sm" class="w-full">
+				<Settings class="mr-2 h-4 w-4" />
+				Settings
+			</Button>
+		</div>
 	</Sidebar.Footer>
 </Sidebar.Root>
 
@@ -1134,6 +1056,15 @@ $effect(() => {
 						</Select.Content>
 					</Select.Root>
 				</div>
+				<div class="flex items-center gap-2">
+					<Checkbox
+						bind:checked={editingFeed.fetch_full_content}
+						id="edit-fetch-full-content"
+					/>
+					<label for="edit-fetch-full-content" class="text-sm cursor-pointer">
+						Fetch full article content (slower)
+					</label>
+				</div>
 			</div>
 			<div class="mt-6 flex justify-between gap-2">
 				<Button 
@@ -1158,21 +1089,155 @@ $effect(() => {
 	</div>
 {/if}
 
+<!-- Add Feed Modal -->
+<Dialog.Root open={showAddFeedModal} onOpenChange={(o) => (showAddFeedModal = o)}>
+	<Dialog.Content class="max-w-[95vw] sm:max-w-md max-h-[90vh] overflow-y-auto">
+		<Dialog.Header>
+			<Dialog.Title>Add New Feed</Dialog.Title>
+			<Dialog.Description>Add a new RSS feed to your collection</Dialog.Description>
+		</Dialog.Header>
+		<div class="space-y-4 py-4">
+			<div class="space-y-2">
+				<label class="text-sm font-medium">Feed Name</label>
+				<Input
+					type="text"
+					placeholder="Feed name"
+					bind:value={newFeedName}
+				/>
+			</div>
+			<div class="space-y-2">
+				<label class="text-sm font-medium">Feed URL</label>
+				<Input
+					type="url"
+					placeholder="https://example.com/feed.xml"
+					bind:value={newFeedUrl}
+				/>
+			</div>
+			<div class="space-y-2">
+				<label class="text-sm font-medium">Retention Days (Optional)</label>
+				<Input
+					type="number"
+					placeholder="30 (default)"
+					bind:value={newFeedRetentionDays}
+				/>
+			</div>
+			<div class="space-y-2">
+				<label class="text-sm font-medium">Polling Interval</label>
+				<div class="flex gap-2 items-center">
+					<Input
+						type="number"
+						placeholder="HH"
+						bind:value={newFeedPollingHours}
+						min="0"
+						class="flex-1"
+					/>
+					<span class="text-sm">:</span>
+					<Input
+						type="number"
+						placeholder="MM"
+						bind:value={newFeedPollingMinutes}
+						min="1"
+						class="flex-1"
+					/>
+				</div>
+			</div>
+			<div class="flex items-center gap-2">
+				<Checkbox
+					bind:checked={newFeedFetchFullContent}
+					id="modal-fetch-full-content"
+				/>
+				<label for="modal-fetch-full-content" class="text-sm cursor-pointer">
+					Fetch full article content (slower)
+				</label>
+			</div>
+			<div class="space-y-2">
+				<label class="text-sm font-medium">Category</label>
+				<div class="flex gap-2 text-sm mb-2">
+					<label class="flex items-center gap-1 cursor-pointer">
+						<input
+							type="radio"
+							bind:group={useExistingCategory}
+							value={true}
+							class="h-3 w-3"
+						/>
+						<span>Existing</span>
+					</label>
+					<label class="flex items-center gap-1 cursor-pointer">
+						<input
+							type="radio"
+							bind:group={useExistingCategory}
+							value={false}
+							class="h-3 w-3"
+						/>
+						<span>New</span>
+					</label>
+				</div>
+				{#if useExistingCategory}
+					<Select.Root type="single" bind:value={selectedCategoryForFeed}>
+						<Select.Trigger>
+							{categoryOptions.find(opt => opt.value === selectedCategoryForFeed)?.label || 'Select category'}
+						</Select.Trigger>
+						<Select.Content>
+							{#each categoryOptions as option (option.value)}
+								<Select.Item value={option.value} label={option.label}>
+									{option.label}
+								</Select.Item>
+							{/each}
+						</Select.Content>
+					</Select.Root>
+				{:else}
+					<Input
+						type="text"
+						placeholder="New category name"
+						bind:value={newCategoryName}
+					/>
+				{/if}
+			</div>
+			{#if processingFeedId}
+				<div class="flex items-center gap-2 p-3 bg-green-500/10 text-green-500 rounded">
+					<CheckCircle class="h-4 w-4" />
+					<span class="text-sm">Feed added successfully!</span>
+				</div>
+			{/if}
+		</div>
+		<Dialog.Footer>
+			<Button
+				variant="outline"
+				onclick={resetAddFeedForm}
+				disabled={isAddingFeed}
+			>
+				Cancel
+			</Button>
+			<Button
+				onclick={addCustomFeed}
+				disabled={isAddingFeed}
+			>
+				{#if isAddingFeed}
+					<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+					Processing...
+				{:else}
+					Add Feed
+				{/if}
+			</Button>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
 <!-- Category Settings Modal -->
 <Dialog.Root open={showCategorySettingsModal} onOpenChange={(o) => (showCategorySettingsModal = o)}>
-  <Dialog.Content class="max-w-7xl p-0">
+  <Dialog.Content class="max-w-[95vw] sm:max-w-2xl lg:max-w-4xl xl:max-w-7xl max-h-[90vh] overflow-hidden p-0">
     <div class="p-6">
       <h3 class="mb-4 text-lg font-semibold">Settings</h3>
       <Tabs.Root bind:value={activeTab} class="w-full">
-<Tabs.List class="grid w-full grid-cols-4">
+<Tabs.List class="grid w-full grid-cols-2 sm:grid-cols-4">
     <Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
     <Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
     <Tabs.Trigger value="preferences">Preferences</Tabs.Trigger>
     <Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
 </Tabs.List>
-        <Tabs.Content value="categories" class="mt-4 min-h-[400px]">
+        <Tabs.Content value="categories" class="mt-4 min-h-[300px] sm:min-h-[400px]">
           <div
-            class="mb-4 max-h-[60vh] overflow-y-auto"
+            class="mb-4 max-h-[50vh] sm:max-h-[60vh] overflow-y-auto"
             use:dndzone={{ items: categoriesList }}
             onconsider={handleDndConsider}
             onfinalize={handleDndFinalize}
@@ -1320,7 +1385,7 @@ $effect(() => {
             {/each}
           </div>
         </Tabs.Content>
-        <Tabs.Content value="ai-filters" class="mt-4 min-h-[400px]">
+        <Tabs.Content value="ai-filters" class="mt-4 min-h-[300px] sm:min-h-[400px]">
           <div class="w-full">
             <div class="flex gap-2 mb-4 border-b">
               <button type="button" class="px-4 py-2 text-sm font-medium transition-colors {aiFilterSubTab === 'prompt' ? 'border-b-2 border-primary text-foreground' : 'text-muted-foreground hover:text-foreground'}" onclick={() => aiFilterSubTab = 'prompt'}>Prompt-Based Filter</button>
@@ -1328,7 +1393,7 @@ $effect(() => {
             </div>
             {#if aiFilterSubTab === 'prompt'}
               <div class="space-y-4 p-4">
-                <div class="space-y-4 max-h-[60vh] overflow-y-auto">
+                <div class="space-y-4 max-h-[50vh] sm:max-h-[60vh] overflow-y-auto">
                   {#each categoriesList as category (category.id)}
                     <div class="rounded-lg border border-border bg-background p-4 space-y-3">
                       <div class="flex items-center justify-between">

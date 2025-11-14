@@ -34,6 +34,8 @@ import asyncpg
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
 from datetime import datetime, timedelta
+from rq import Queue
+from redis import Redis
 
 import logging
 import asyncio
@@ -60,6 +62,7 @@ import database  # Import database module
 import ai_filter  # Import AI filtering module
 import keyword_filter  # Import keyword/topic filtering module
 import cache  # Import cache module
+from youtube_embed import convert_links_to_embeds
 
 load_dotenv()  # Load environment variables
 
@@ -515,6 +518,110 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
         logging.exception("Error parsing/storing feed for URL: %s | Error: %s", rss_url, e)
 
 
+async def parse_and_store_rss_feed_initial(feed_id: int, rss_url: str, category: str, source_name: str = "Unknown"):
+    """
+    Initial synchronous feed fetch - stores only basic article data (no full-text extraction).
+    This is fast and provides immediate feedback when adding a new feed.
+    """
+    logging.debug("Initial parsing of feed URL: %s for category: %s", rss_url, category)
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(rss_url, headers={'User-Agent':'Mozilla/5.0'}, timeout=10)
+            resp.raise_for_status()
+        feed = feedparser.parse(resp.content)
+
+        # For initial fetch, go back 10 days
+        threshold = datetime.now(IST) - timedelta(days=10)
+        new_last_update = threshold
+
+        conn = await get_db_connection()
+        articles_added = 0
+
+        try:
+            for entry in feed.entries:
+                title       = getattr(entry, "title", "Untitled")
+                link        = getattr(entry, "link", "#")
+                description = getattr(entry, "summary", "No description available.")
+
+                thumbnail_url = DEFAULT_THUMBNAIL
+                if "media_thumbnail" in entry:
+                    thumbnail_url = entry.media_thumbnail[0].get("url")
+                elif "media_content" in entry:
+                    thumbnail_url = entry.media_content[0].get("url")
+
+                raw_published = getattr(entry, "published", None) or getattr(entry, "updated", None)
+                published_formatted = format_datetime(raw_published, source_name)
+
+                struct = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
+                if struct:
+                    dt_utc = datetime.fromtimestamp(time.mktime(struct), tz=pytz.utc)
+                    pub_dt = dt_utc.astimezone(IST)
+                else:
+                    try:
+                        pub_dt = date_parser.parse(raw_published) if raw_published else None
+                        pub_dt = pub_dt if pub_dt and pub_dt.tzinfo else (IST.localize(pub_dt) if pub_dt else None)
+                    except Exception:
+                        pub_dt = None
+
+                if not pub_dt or pub_dt <= threshold:
+                    continue
+
+                if pub_dt > new_last_update:
+                    new_last_update = pub_dt
+
+                if await conn.fetchval('SELECT id FROM articles WHERE link = $1', link):
+                    continue
+
+                # NO FULL-TEXT EXTRACTION - just store the summary from the feed
+                article_content = None
+
+                # Insert article and get its ID
+                article_id = await conn.fetchval(
+                    'INSERT INTO articles '
+                    '(title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) '
+                    'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) '
+                    'RETURNING id',
+                    title, link, description, thumbnail_url,
+                     published_formatted, pub_dt, category, article_content, source_name, feed_id, rss_url
+                )
+                articles_added += 1
+
+                # Process with AI filter if enabled for this category (only for NEW articles)
+                try:
+                    await ai_filter.process_new_article(article_id, category, conn)
+                except Exception as e:
+                    logging.warning(f"AI filter processing failed for article {article_id}: {e}")
+                
+                # Process with keyword/topic filters (auto-star and notify if matched)
+                try:
+                    await keyword_filter.process_article_filters(
+                        article_id, title, link, description, article_content, 
+                        category, source_name, conn
+                    )
+                except Exception as e:
+                    logging.warning(f"Keyword filter processing failed for article {article_id}: {e}")
+
+                # Note: Notifications are NOT sent during initial fetch to avoid spam
+                # They will be sent by the worker during subsequent updates
+
+        finally:
+            await database.release_db_connection(conn)
+
+        if new_last_update > threshold:
+            await update_feed_last_update(rss_url, new_last_update)
+            logging.info("Updated feed state for %s → %s", rss_url, new_last_update)
+            
+            # Invalidate feed caches after new articles are added
+            cache.invalidate_feeds_cache()
+
+        logging.info(f"Initial fetch completed for {source_name}: {articles_added} articles added")
+        return articles_added
+
+    except Exception as e:
+        logging.exception("Error in initial fetch for URL: %s | Error: %s", rss_url, e)
+        raise
+
+
 async def fetch_single_feed(feed_id: int, name: str, url: str, category: str):
     """Fetch a single feed by its ID"""
     start_time = datetime.now(IST)
@@ -553,43 +660,44 @@ async def fetch_all_feeds_db():
         logging.info("Feed update completed at %s", end_time)
 
 
-async def schedule_all_feeds():
-    """Schedule individual jobs for each active feed based on their polling_interval"""
-    conn = await get_db_connection()
-    
-    try:
-        active_feeds = await conn.fetch('SELECT id, name, url, category, polling_interval FROM feeds WHERE "isActive" = true')
-        
-        for feed in active_feeds:
-            feed_id = feed['id']
-            name = feed['name']
-            url = feed['url']
-            category = feed['category']
-            polling_interval = feed['polling_interval'] or 1  # Default to 1 minute if None
-            
-            # Create unique job ID for this feed
-            job_id = f"feed_{feed_id}"
-            
-            # Remove existing job if it exists
-            if scheduler.get_job(job_id):
-                scheduler.remove_job(job_id)
-            
-            # Schedule the feed with its custom interval
-            scheduler.add_job(
-                fetch_single_feed,
-                'interval',
-                minutes=polling_interval,
-                args=[feed_id, name, url, category],
-                id=job_id,
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=300
-            )
-            
-            logging.info(f"Scheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
-    
-    finally:
-        await database.release_db_connection(conn)
+# ===== OLD SCHEDULING FUNCTIONS (DEPRECATED - Kept for reference/rollback) =====
+# async def schedule_all_feeds():
+#     """Schedule individual jobs for each active feed based on their polling_interval"""
+#     conn = await get_db_connection()
+#     
+#     try:
+#         active_feeds = await conn.fetch('SELECT id, name, url, category, polling_interval FROM feeds WHERE "isActive" = true')
+#         
+#         for feed in active_feeds:
+#             feed_id = feed['id']
+#             name = feed['name']
+#             url = feed['url']
+#             category = feed['category']
+#             polling_interval = feed['polling_interval'] or 1  # Default to 1 minute if None
+#             
+#             # Create unique job ID for this feed
+#             job_id = f"feed_{feed_id}"
+#             
+#             # Remove existing job if it exists
+#             if scheduler.get_job(job_id):
+#                 scheduler.remove_job(job_id)
+#             
+#             # Schedule the feed with its custom interval
+#             scheduler.add_job(
+#                 fetch_single_feed,
+#                 'interval',
+#                 minutes=polling_interval,
+#                 args=[feed_id, name, url, category],
+#                 id=job_id,
+#                 max_instances=1,
+#                 coalesce=True,
+#                 misfire_grace_time=300
+#             )
+#             
+#             logging.info(f"Scheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
+#     
+#     finally:
+#         await database.release_db_connection(conn)
 
 
 async def get_total_articles_count(category: str = None, days: int = 2, starred_only: bool = False, search_query: str = None, feed_url: str = None):
@@ -866,16 +974,99 @@ async def cleanup_old_articles():
         logging.info("Finished scheduled cleanup of old articles.")
 
 
+async def enqueue_due_feeds():
+    """
+    Batch scheduler job: Query for feeds due for refresh and enqueue them to Redis queue.
+    This replaces the per-feed scheduling approach with a scalable batch model.
+    Runs every 1 minute.
+    """
+    global feed_queue
+    
+    if not feed_queue:
+        logging.warning("Feed queue not initialized, skipping enqueue")
+        return
+    
+    try:
+        logging.debug("Checking for due feeds...")
+        conn = await database.get_db_connection()
+        
+        # Query for feeds that are due for refresh
+        due_feeds = await conn.fetch("""
+            SELECT id, name, url, category, polling_interval, etag_header, last_modified_header, fetch_full_content
+            FROM feeds
+            WHERE "isActive" = true 
+            AND next_check_at <= NOW()
+            ORDER BY next_check_at ASC
+            LIMIT 100
+        """)
+        
+        if not due_feeds:
+            logging.debug("No feeds due for refresh")
+            await database.release_db_connection(conn)
+            return
+        
+        logging.info(f"Found {len(due_feeds)} feeds due for refresh")
+        
+        # Import worker function
+        from worker import process_feed_job
+        
+        # Enqueue each due feed
+        for feed in due_feeds:
+            feed_id = feed['id']
+            name = feed['name']
+            url = feed['url']
+            category = feed['category']
+            polling_interval = feed['polling_interval'] or 60
+            etag = feed['etag_header']
+            last_modified = feed['last_modified_header']
+            fetch_full_content = feed['fetch_full_content'] or False
+            
+            # Enqueue job to Redis
+            job = feed_queue.enqueue(
+                process_feed_job,
+                feed_id=feed_id,
+                name=name,
+                url=url,
+                category=category,
+                polling_interval=polling_interval,
+                etag=etag,
+                last_modified=last_modified,
+                fetch_full_content=fetch_full_content,
+                job_timeout='10m',  # 10 minute timeout per feed
+                job_id=f"feed_{feed_id}_{int(datetime.now().timestamp())}",  # Unique job ID
+                failure_ttl=86400  # Keep failed jobs for 24 hours
+            )
+            
+            # Immediately update next_check_at to prevent duplicate queueing
+            next_check = datetime.now(IST) + timedelta(minutes=polling_interval)
+            await conn.execute(
+                "UPDATE feeds SET next_check_at = $1 WHERE id = $2",
+                next_check, feed_id
+            )
+            
+            logging.debug(f"Enqueued feed {name} (ID: {feed_id}), job ID: {job.id}")
+        
+        await database.release_db_connection(conn)
+        logging.info(f"Successfully enqueued {len(due_feeds)} feeds")
+        
+    except Exception as e:
+        logging.exception(f"Error in enqueue_due_feeds: {e}")
+
+
 scheduler = AsyncIOScheduler(timezone=IST)
 
 # Global Redis client for search index
 redis_client = None
 
+# RQ Redis connection and queue for feed processing
+rq_redis = None
+feed_queue = None
+
 @app.on_event("startup")
 async def startup_event():
-    global redis_client
+    global redis_client, rq_redis, feed_queue
     
-    # Initialize Redis client
+    # Initialize Redis client for caching
     redis_client = aioredis.from_url(
         f"redis://{Config.REDIS_HOST}:{Config.REDIS_PORT}/{Config.REDIS_DB}",
         encoding="utf-8",
@@ -885,6 +1076,16 @@ async def startup_event():
     # Initialize FastAPI Cache with Redis backend
     FastAPICache.init(RedisBackend(redis_client), prefix="fastapi-cache")
     
+    # Initialize RQ Redis connection for job queue
+    rq_redis = Redis(
+        host=Config.REDIS_HOST,
+        port=Config.REDIS_PORT,
+        db=Config.REDIS_DB,
+        decode_responses=False  # RQ handles encoding
+    )
+    feed_queue = Queue('feed-queue', connection=rq_redis)
+    logging.info(f"RQ feed queue initialized: {len(feed_queue)} jobs pending")
+    
     # Initialize database connection pool
     await database.init_db_pool()
     await init_db()
@@ -892,28 +1093,112 @@ async def startup_event():
     # Initialize reports database
     await reports.init_reports_db()
     
-    # Run the first feed fetch in the background immediately on startup
-    asyncio.create_task(fetch_all_feeds_db())
     # Build initial search index
     asyncio.create_task(build_search_index())
     
-    # Schedule individual feeds with their custom polling intervals
-    await schedule_all_feeds()
+    # ===== NEW SCALABLE ARCHITECTURE =====
+    # Single batch scheduler job runs every minute to enqueue due feeds
+    scheduler.add_job(enqueue_due_feeds, 'interval', minutes=1, id='batch_feed_scheduler')
+    logging.info("Batch feed scheduler initialized (runs every 1 minute)")
     
+    # Other scheduled jobs
     scheduler.add_job(cleanup_old_articles, 'cron', hour=0)  # Run daily at midnight
     scheduler.add_job(build_search_index, 'interval', minutes=5)  # Update search index every 5 minutes
     scheduler.start()
     
     # Load and schedule reports
     await reports.load_and_schedule_reports(scheduler)
+    
+    # Trigger initial feed enqueue
+    asyncio.create_task(enqueue_due_feeds())
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global redis_client
+    global redis_client, rq_redis
     if redis_client:
         await redis_client.close()
+    if rq_redis:
+        rq_redis.close()
     # Close database pool
     await database.close_db_pool()
+
+
+# --- Queue Monitoring Endpoint ---
+@app.get("/api/queue/status")
+async def get_queue_status():
+    """Monitor RQ job queue status for debugging and health checks."""
+    global feed_queue
+    
+    if not feed_queue:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Queue not initialized"}
+        )
+    
+    try:
+        from rq import Worker
+        from rq.registry import (
+            StartedJobRegistry,
+            FinishedJobRegistry, 
+            FailedJobRegistry,
+            ScheduledJobRegistry
+        )
+        
+        # Get queue stats
+        queued_count = len(feed_queue)
+        
+        # Get worker count
+        workers = Worker.all(connection=rq_redis)
+        # Filter for active workers (check state instead of stopped attribute)
+        active_workers = [w for w in workers if w.state in ['busy', 'idle']]
+        
+        # Get job registries
+        started_registry = StartedJobRegistry('feed-queue', connection=rq_redis)
+        finished_registry = FinishedJobRegistry('feed-queue', connection=rq_redis)
+        failed_registry = FailedJobRegistry('feed-queue', connection=rq_redis)
+        scheduled_registry = ScheduledJobRegistry('feed-queue', connection=rq_redis)
+        
+        # Get next feeds due for refresh
+        conn = await database.get_db_connection()
+        next_due_feeds = await conn.fetch("""
+            SELECT id, name, next_check_at
+            FROM feeds
+            WHERE "isActive" = true AND next_check_at <= NOW() + INTERVAL '5 minutes'
+            ORDER BY next_check_at ASC
+            LIMIT 10
+        """)
+        await database.release_db_connection(conn)
+        
+        return {
+            "queue": {
+                "queued_jobs": queued_count,
+                "started_jobs": len(started_registry),
+                "finished_jobs": len(finished_registry),
+                "failed_jobs": len(failed_registry),
+                "scheduled_jobs": len(scheduled_registry)
+            },
+            "workers": {
+                "total": len(workers),
+                "active": len(active_workers),
+                "worker_names": [w.name for w in active_workers]
+            },
+            "next_due_feeds": [
+                {
+                    "id": f['id'],
+                    "name": f['name'],
+                    "next_check_at": f['next_check_at'].isoformat() if f['next_check_at'] else None
+                }
+                for f in next_due_feeds
+            ],
+            "status": "healthy" if len(active_workers) > 0 else "warning"
+        }
+        
+    except Exception as e:
+        logging.exception(f"Error getting queue status: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 
 # --- Search Index Functions ---
@@ -1106,7 +1391,7 @@ async def get_feeds_config():
     ordered_categories_rows = await conn.fetch('SELECT name FROM categories ORDER BY priority')
     ordered_categories = [row['name'] for row in ordered_categories_rows]
     
-    all_feeds_rows = await conn.fetch('SELECT id, name, url, category, "isActive", priority, retention_days, polling_interval FROM feeds')
+    all_feeds_rows = await conn.fetch('SELECT id, name, url, category, "isActive", priority, retention_days, polling_interval, fetch_full_content FROM feeds')
     
     feeds_by_category = {}
     for row in all_feeds_rows:
@@ -1136,6 +1421,7 @@ async def get_feeds_config():
             "priority": row['priority'],
             "retention_days": row['retention_days'],
             "polling_interval": row['polling_interval'],
+            "fetch_full_content": row['fetch_full_content'],
             "unread_count": unread_count
         })
         
@@ -1194,7 +1480,7 @@ async def update_feeds_config(request: Request):
 
 @app.get("/api/feeds")
 async def feeds(
-    days: int = Query(2, description="Number of days back to fetch articles for.", ge=1, le=30),
+    days: int = Query(10, description="Number of days back to fetch articles for.", ge=1, le=30),
     q: str = Query(None, description="Search query for articles"),
     category: str = Query(None, description="Category filter for search"),
     feed_url: str = Query(None, description="Feed URL to filter by specific feed"),
@@ -1585,7 +1871,7 @@ async def mark_feed_articles_as_read(request: Request):
 
 @app.post("/api/add-feed")
 async def add_feed(request: Request):
-    """Add a custom RSS feed to the database"""
+    """Add a custom RSS feed to the database with synchronous initial fetch"""
     try:
         body = await request.json()
         url = body.get("url", "").strip()
@@ -1593,6 +1879,7 @@ async def add_feed(request: Request):
         name = body.get("name", "").strip()
         retention_days = body.get("retention_days") # Can be None
         polling_interval = body.get("polling_interval", 60) # Default to 60 minutes (1 hour)
+        fetch_full_content = body.get("fetch_full_content", False) # Default to False for fast initial fetch
         
         if not url or not category_name:
             return JSONResponse({"error": "URL and category are required"}, status_code=400)
@@ -1611,42 +1898,53 @@ async def add_feed(request: Request):
 
             result = await conn.execute(
                 """
-                INSERT INTO feeds (name, url, category, "isActive", priority, retention_days, polling_interval)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO feeds (name, url, category, "isActive", priority, retention_days, polling_interval, fetch_full_content)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ON CONFLICT (url) DO NOTHING;
                 """,
-                feed_name, url, category_name, True, max_priority + 1, retention_days, polling_interval
+                feed_name, url, category_name, True, max_priority + 1, retention_days, polling_interval, fetch_full_content
             )
             if result == 'INSERT 0 0':
                 return JSONResponse({"error": "Feed with this URL already exists"}, status_code=400)
 
             feed_id = await conn.fetchval("SELECT id FROM feeds WHERE url = $1", url)
-            await parse_and_store_rss_feed(feed_id, url, category_name, feed_name)
             
-            # Schedule the new feed
-            job_id = f"feed_{feed_id}"
-            if scheduler.get_job(job_id):
-                scheduler.remove_job(job_id)
-            
-            scheduler.add_job(
-                fetch_single_feed,
-                'interval',
-                minutes=polling_interval,
-                args=[feed_id, feed_name, url, category_name],
-                id=job_id,
-                max_instances=1,
-                coalesce=True,
-                misfire_grace_time=300
+            # Set next_check_at for future updates by the batch scheduler
+            next_check = datetime.now(IST) + timedelta(minutes=polling_interval)
+            await conn.execute(
+                "UPDATE feeds SET next_check_at = $1 WHERE id = $2",
+                next_check, feed_id
             )
-            logging.info(f"Scheduled new feed '{feed_name}' (ID: {feed_id}) with {polling_interval} minute interval")
             
-            return JSONResponse({"message": "Feed added successfully", "category": category_name, "url": url})
-
         except asyncpg.PostgresError as e:
             logging.exception("Database error adding feed: %s", str(e))
+            await database.release_db_connection(conn)
             return JSONResponse({"error": "Database error"}, status_code=500)
         finally:
             await database.release_db_connection(conn)
+        
+        # Perform synchronous initial fetch (fast - no full-text extraction)
+        try:
+            articles_added = await parse_and_store_rss_feed_initial(feed_id, url, category_name, feed_name)
+            
+            # Invalidate feed caches after adding a new feed
+            cache.invalidate_feeds_cache()
+            
+            return JSONResponse({
+                "message": f"Feed added successfully with {articles_added} articles", 
+                "category": category_name, 
+                "url": url,
+                "feed_id": feed_id,
+                "articles_added": articles_added
+            })
+        except Exception as e:
+            logging.exception("Error during initial feed fetch: %s", str(e))
+            return JSONResponse({
+                "error": f"Feed added but initial fetch failed: {str(e)}", 
+                "category": category_name, 
+                "url": url,
+                "feed_id": feed_id
+            }, status_code=500)
 
     except Exception as e:
         logging.exception("Error adding feed: %s", str(e))
@@ -1661,6 +1959,12 @@ async def article_full_text(url: str):
         if cached_result is not None:
             return cached_result
         
+        youtube_only_html = convert_links_to_embeds(url)
+        if "youtube-embed-placeholder" in youtube_only_html:
+            result = JSONResponse({"content": youtube_only_html})
+            cache.set_in_cache(cache_key, result)
+            return result
+
         conn = await get_db_connection()
         content_html = await conn.fetchval('SELECT content FROM articles WHERE link = $1', url)
         await database.release_db_connection(conn)
@@ -1676,9 +1980,13 @@ async def article_full_text(url: str):
                 content_html = "<p>" + a.text.replace('\n', '</p><p>') + "</p>"
 
         if content_html:
-            # Format the article content for consistent, readable display
-            formatted_content = format_article_content(content_html)
-            result = JSONResponse({"content": formatted_content})
+            content_html = convert_links_to_embeds(content_html)
+            if "youtube-embed-placeholder" in content_html:
+                result = JSONResponse({"content": content_html})
+            else:
+                # Format the article content for consistent, readable display
+                formatted_content = format_article_content(content_html)
+                result = JSONResponse({"content": formatted_content})
         else:
             result = JSONResponse({"content": "<p>No content could be extracted.</p>"})
         
@@ -1714,33 +2022,24 @@ async def update_feed(feed_id: int, request: Request):
         priority = body.get("priority")
         retention_days = body.get("retention_days") # Can be None
         polling_interval = body.get("polling_interval", 60) # Default to 60 minutes (1 hour)
+        fetch_full_content = body.get("fetch_full_content", False)
 
         if not all([name, url, category]):
             raise HTTPException(status_code=400, detail="Name, URL, and category are required.")
 
         conn = await get_db_connection()
+        
+        # Update feed details and reset next_check_at to trigger immediate refresh
+        next_check = datetime.now(IST)
         await conn.execute(
-            'UPDATE feeds SET name = $1, url = $2, category = $3, priority = $4, retention_days = $5, polling_interval = $6 WHERE id = $7',
-            name, url, category, priority, retention_days, polling_interval, feed_id
+            'UPDATE feeds SET name = $1, url = $2, category = $3, priority = $4, retention_days = $5, polling_interval = $6, fetch_full_content = $7, next_check_at = $8 WHERE id = $9',
+            name, url, category, priority, retention_days, polling_interval, fetch_full_content, next_check, feed_id
         )
         await database.release_db_connection(conn)
         
-        # Reschedule the feed with new interval
-        job_id = f"feed_{feed_id}"
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
-        
-        scheduler.add_job(
-            fetch_single_feed,
-            'interval',
-            minutes=polling_interval,
-            args=[feed_id, name, url, category],
-            id=job_id,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=300
-        )
-        logging.info(f"Rescheduled feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval")
+        # The batch scheduler will pick up the feed automatically based on next_check_at
+        # No need for APScheduler jobs anymore
+        logging.info(f"Updated feed '{name}' (ID: {feed_id}) with {polling_interval} minute interval, will be picked up by batch scheduler")
         
         return JSONResponse({"message": "Feed updated successfully."})
     except Exception as e:
@@ -1749,19 +2048,25 @@ async def update_feed(feed_id: int, request: Request):
 
 @app.delete("/api/feed/{feed_id}")
 async def delete_feed(feed_id: int):
-    """Delete a feed."""
+    """Delete a feed and its associated articles."""
     try:
         conn = await get_db_connection()
+        
+        # Delete articles first (explicit, though CASCADE should handle this)
+        articles_deleted = await conn.execute('DELETE FROM articles WHERE feed_id = $1', feed_id)
+        
+        # Delete the feed
         await conn.execute('DELETE FROM feeds WHERE id = $1', feed_id)
+        
         await database.release_db_connection(conn)
         
-        # Remove the scheduled job for this feed
-        job_id = f"feed_{feed_id}"
-        if scheduler.get_job(job_id):
-            scheduler.remove_job(job_id)
-            logging.info(f"Removed scheduled job for deleted feed ID: {feed_id}")
+        # No need to remove APScheduler jobs anymore - using RQ worker system
+        logging.info(f"Deleted feed ID: {feed_id} and its articles")
         
-        return JSONResponse({"message": "Feed deleted successfully."})
+        # Invalidate feed caches after deleting a feed
+        cache.invalidate_feeds_cache()
+        
+        return JSONResponse({"message": "Feed and associated articles deleted successfully."})
     except Exception as e:
         logging.error(f"Error deleting feed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2089,7 +2394,7 @@ async def feeds_column(request: Request):
 
     categories_list = []
     for category in categories:
-        articles = await get_articles_for_category_db(category, days=2)
+        articles = await get_articles_for_category_db(category, days=10)
         categories_list.append({"category": category, "feed_items": articles})
     return templates.TemplateResponse("feeds-split.html", {"request": request, "categories": categories_list})
 
