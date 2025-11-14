@@ -85,7 +85,7 @@ async def init_db():
         """)
         logger.info("Categories table initialized")
         
-        # Feeds table - includes display_order, retention_days, polling_interval
+        # Feeds table - includes display_order, retention_days, polling_interval, scalability columns, fetch_full_content
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS feeds (
                 id SERIAL PRIMARY KEY,
@@ -96,7 +96,11 @@ async def init_db():
                 priority INTEGER DEFAULT 0,
                 retention_days INTEGER,
                 display_order INTEGER DEFAULT 0,
-                polling_interval INTEGER DEFAULT 60
+                polling_interval INTEGER DEFAULT 60,
+                next_check_at TIMESTAMPTZ DEFAULT NOW(),
+                etag_header TEXT,
+                last_modified_header TEXT,
+                fetch_full_content BOOLEAN DEFAULT false
             );
         """)
         logger.info("Feeds table initialized")
@@ -277,6 +281,34 @@ async def init_db():
             logger.info("Added polling_interval column to feeds table")
         except Exception as e:
             logger.debug(f"polling_interval column might already exist: {e}")
+        
+        # Add scalability columns to feeds if they don't exist
+        try:
+            await conn.execute("""
+                ALTER TABLE feeds 
+                ADD COLUMN IF NOT EXISTS next_check_at TIMESTAMPTZ DEFAULT NOW();
+            """)
+            await conn.execute("""
+                ALTER TABLE feeds 
+                ADD COLUMN IF NOT EXISTS etag_header TEXT;
+            """)
+            await conn.execute("""
+                ALTER TABLE feeds 
+                ADD COLUMN IF NOT EXISTS last_modified_header TEXT;
+            """)
+            logger.info("Added scalability columns (next_check_at, etag_header, last_modified_header) to feeds table")
+        except Exception as e:
+            logger.debug(f"Scalability columns might already exist: {e}")
+        
+        # Add fetch_full_content column to feeds if it doesn't exist
+        try:
+            await conn.execute("""
+                ALTER TABLE feeds 
+                ADD COLUMN IF NOT EXISTS fetch_full_content BOOLEAN DEFAULT false;
+            """)
+            logger.info("Added fetch_full_content column to feeds table")
+        except Exception as e:
+            logger.debug(f"fetch_full_content column might already exist: {e}")
         
         # Initialize default timezone setting if not exists
         timezone_exists = await conn.fetchval(
