@@ -14,6 +14,7 @@ import Input from '$lib/components/ui/input/index.svelte';
 import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 import FeedSidebar from '$lib/components/FeedSidebar.svelte';
 import KeyboardShortcutsDialog from '$lib/components/KeyboardShortcutsDialog.svelte';
+import YoutubeEmbed from '$lib/components/YoutubeEmbed.svelte';
 import { settings } from '$lib/stores/settings.ts';
 
 	let { data }: { data: PageData } = $props();
@@ -1364,10 +1365,7 @@ onDestroy(() => {
 								</div>
 							</div>
 							<Separator />
-							<div class="prose prose-sm max-w-none dark:prose-invert">
-								{@html articleContent}
-							</div>
-							
+							<YoutubeEmbed htmlContent={articleContent} />
 						</div>
 					{/if}
 				</Card>
@@ -1444,8 +1442,8 @@ onDestroy(() => {
 					<p class="text-muted-foreground">Loading article content...</p>
 				</div>
 			{:else}
-				<div class="prose prose-sm max-w-none dark:prose-invert max-h-[60vh] sm:max-h-[70vh] overflow-auto">
-					{@html articleContent}
+				<div class="max-h-[60vh] sm:max-h-[70vh] overflow-auto">
+					<YoutubeEmbed htmlContent={articleContent} />
 				</div>
 			{/if}
 		</div>
