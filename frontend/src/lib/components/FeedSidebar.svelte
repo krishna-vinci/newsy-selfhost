@@ -789,6 +789,13 @@ async function importOPML(event: Event) {
 	const file = input.files?.[0];
 	if (!file) return;
 	
+	// Validate file type
+	if (!file.name.endsWith('.opml') && !file.name.endsWith('.xml')) {
+		toast.error('Please select an OPML or XML file');
+		input.value = '';
+		return;
+	}
+	
 	const formData = new FormData();
 	formData.append('file', file);
 	
@@ -800,15 +807,34 @@ async function importOPML(event: Event) {
 		
 		if (response.ok) {
 			const result = await response.json();
-			toast.success(`Imported ${result.imported} feeds (${result.skipped} skipped)`);
+			
+			// Build success message
+			let message = `Imported ${result.imported} feeds`;
+			if (result.skipped > 0) {
+				message += ` (${result.skipped} already exist)`;
+			}
+			if (result.categories_created && result.categories_created.length > 0) {
+				message += `, created ${result.categories_created.length} categories`;
+			}
+			
+			toast.success(message, { duration: 5000 });
+			
+			// Show warnings if any
+			if (result.warnings && result.warnings.length > 0) {
+				toast.warning(`Import completed with ${result.warnings.length} warnings. Check console for details.`);
+				console.warn('OPML import warnings:', result.warnings);
+			}
+			
 			await loadFeedConfig();
+			await loadCategories();
 			onconfigchanged();
 		} else {
-			toast.error('Failed to import OPML');
+			const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+			toast.error(`Failed to import OPML: ${error.detail || 'Unknown error'}`);
 		}
 	} catch (error) {
-		toast.error('Failed to import OPML');
-		console.error(error);
+		toast.error('Failed to import OPML. Please check the file format.');
+		console.error('OPML import error:', error);
 	}
 	
 	// Reset input

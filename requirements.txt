@@ -4,7 +4,7 @@ feedparser
 httpx
 markdown2
 html2text
-newspaper3k
+readability-lxml
 python-dotenv
 fastapi[standard]
 starlette

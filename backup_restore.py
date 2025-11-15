@@ -350,10 +350,20 @@ async def export_opml():
 
 @router.post("/api/opml/import")
 async def import_opml(file: UploadFile = File(...)):
-    """Import feeds from OPML file"""
+    """Import feeds from OPML file with robust duplicate handling"""
+    if not file:
+        raise HTTPException(status_code=400, detail="No file provided")
+    
+    # Validate file type
+    if not (file.filename.endswith('.opml') or file.filename.endswith('.xml')):
+        raise HTTPException(status_code=400, detail="File must be .opml or .xml format")
+    
     try:
         # Read and parse OPML file
         content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="File is empty")
+        
         root = ET.fromstring(content)
         
         conn = await get_db_connection()
@@ -361,6 +371,7 @@ async def import_opml(file: UploadFile = File(...)):
         imported_count = 0
         skipped_count = 0
         categories_created = []
+        errors = []
         
         # Find all outline elements
         body = root.find("body")
@@ -377,14 +388,22 @@ async def import_opml(file: UploadFile = File(...)):
                 
                 # Create category if it doesn't exist
                 try:
-                    await conn.execute(
-                        "INSERT INTO categories (name, priority) SELECT $1, COALESCE(MAX(priority), 0) + 1 FROM categories ON CONFLICT (name) DO NOTHING",
+                    # Check if category exists first
+                    category_exists = await conn.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM categories WHERE name = $1)",
                         category_name
                     )
-                    if category_name not in categories_created:
+                    
+                    if not category_exists:
+                        await conn.execute(
+                            "INSERT INTO categories (name, priority) SELECT $1, COALESCE(MAX(priority), 0) + 1 FROM categories",
+                            category_name
+                        )
                         categories_created.append(category_name)
-                except Exception:
-                    pass
+                        logging.info(f"Created new category: {category_name}")
+                except Exception as e:
+                    logging.warning(f"Error creating category {category_name}: {str(e)}")
+                    errors.append(f"Category '{category_name}': {str(e)}")
                 
                 # Import feeds in this category
                 for feed_outline in child_outlines:
@@ -393,24 +412,31 @@ async def import_opml(file: UploadFile = File(...)):
                     
                     if feed_url:
                         try:
-                            await conn.execute(
-                                """
-                                INSERT INTO feeds (name, url, category, "isActive", display_order)
-                                SELECT $1, $2, $3, true, COALESCE(MAX(display_order), 0) + 1
-                                FROM feeds WHERE category = $3
-                                ON CONFLICT (url) DO NOTHING
-                                """,
-                                feed_name, feed_url, category_name
+                            # Check if feed already exists
+                            existing_feed = await conn.fetchrow(
+                                "SELECT id, name, category FROM feeds WHERE url = $1",
+                                feed_url
                             )
-                            # Check if it was actually inserted
-                            exists = await conn.fetchval("SELECT COUNT(*) FROM feeds WHERE url = $1", feed_url)
-                            if exists == 1:
-                                imported_count += 1
-                            else:
+                            
+                            if existing_feed:
                                 skipped_count += 1
+                                logging.info(f"Skipped existing feed: {feed_name} (already in '{existing_feed['category']}')")
+                            else:
+                                # Insert new feed
+                                await conn.execute(
+                                    """
+                                    INSERT INTO feeds (name, url, category, "isActive", display_order)
+                                    SELECT $1, $2, $3, true, COALESCE(MAX(display_order), 0) + 1
+                                    FROM feeds WHERE category = $3
+                                    """,
+                                    feed_name, feed_url, category_name
+                                )
+                                imported_count += 1
+                                logging.info(f"Imported feed: {feed_name} -> {category_name}")
                         except Exception as e:
-                            logging.warning(f"Error importing feed {feed_name}: {str(e)}")
+                            logging.error(f"Error importing feed {feed_name} ({feed_url}): {str(e)}")
                             skipped_count += 1
+                            errors.append(f"Feed '{feed_name}': {str(e)}")
             else:
                 # This is an uncategorized feed
                 feed_url = category_outline.get("xmlUrl")
@@ -422,49 +448,80 @@ async def import_opml(file: UploadFile = File(...)):
                     
                     # Create default category if it doesn't exist
                     try:
-                        await conn.execute(
-                            "INSERT INTO categories (name, priority) SELECT $1, COALESCE(MAX(priority), 0) + 1 FROM categories ON CONFLICT (name) DO NOTHING",
+                        category_exists = await conn.fetchval(
+                            "SELECT EXISTS(SELECT 1 FROM categories WHERE name = $1)",
                             default_category
                         )
-                        if default_category not in categories_created:
-                            categories_created.append(default_category)
-                    except Exception:
-                        pass
+                        
+                        if not category_exists:
+                            await conn.execute(
+                                "INSERT INTO categories (name, priority) SELECT $1, COALESCE(MAX(priority), 0) + 1 FROM categories",
+                                default_category
+                            )
+                            if default_category not in categories_created:
+                                categories_created.append(default_category)
+                                logging.info(f"Created default category: {default_category}")
+                    except Exception as e:
+                        logging.warning(f"Error creating default category: {str(e)}")
+                        errors.append(f"Default category: {str(e)}")
                     
                     try:
-                        await conn.execute(
-                            """
-                            INSERT INTO feeds (name, url, category, "isActive", display_order)
-                            SELECT $1, $2, $3, true, COALESCE(MAX(display_order), 0) + 1
-                            FROM feeds WHERE category = $3
-                            ON CONFLICT (url) DO NOTHING
-                            """,
-                            feed_name, feed_url, default_category
+                        # Check if feed already exists
+                        existing_feed = await conn.fetchrow(
+                            "SELECT id, name, category FROM feeds WHERE url = $1",
+                            feed_url
                         )
-                        # Check if it was actually inserted
-                        exists = await conn.fetchval("SELECT COUNT(*) FROM feeds WHERE url = $1", feed_url)
-                        if exists == 1:
-                            imported_count += 1
-                        else:
+                        
+                        if existing_feed:
                             skipped_count += 1
+                            logging.info(f"Skipped existing feed: {feed_name} (already in '{existing_feed['category']}')")
+                        else:
+                            # Insert new feed
+                            await conn.execute(
+                                """
+                                INSERT INTO feeds (name, url, category, "isActive", display_order)
+                                SELECT $1, $2, $3, true, COALESCE(MAX(display_order), 0) + 1
+                                FROM feeds WHERE category = $3
+                                """,
+                                feed_name, feed_url, default_category
+                            )
+                            imported_count += 1
+                            logging.info(f"Imported uncategorized feed: {feed_name} -> {default_category}")
                     except Exception as e:
-                        logging.warning(f"Error importing feed {feed_name}: {str(e)}")
+                        logging.error(f"Error importing uncategorized feed {feed_name} ({feed_url}): {str(e)}")
                         skipped_count += 1
+                        errors.append(f"Feed '{feed_name}': {str(e)}")
         
         await database.release_db_connection(conn)
         
-        return JSONResponse({
-            "message": "OPML import completed",
+        # Build response message
+        message = f"OPML import completed: {imported_count} feeds imported, {skipped_count} skipped"
+        if categories_created:
+            message += f", {len(categories_created)} categories created"
+        
+        response_data = {
+            "message": message,
             "imported": imported_count,
             "skipped": skipped_count,
-            "categories_created": categories_created
-        })
+            "categories_created": categories_created,
+            "success": True
+        }
         
-    except ET.ParseError:
-        raise HTTPException(status_code=400, detail="Invalid OPML file format")
+        if errors:
+            response_data["warnings"] = errors[:10]  # Limit to first 10 errors
+            logging.warning(f"OPML import completed with {len(errors)} warnings")
+        
+        logging.info(f"OPML import summary: {imported_count} imported, {skipped_count} skipped, {len(categories_created)} categories created")
+        return JSONResponse(response_data)
+        
+    except ET.ParseError as e:
+        logging.error(f"OPML parse error: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Invalid OPML file format: {str(e)}")
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        logging.error(f"Error importing OPML: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logging.exception(f"Unexpected error importing OPML: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to import OPML: {str(e)}")
 
 # --- Feed Reordering Endpoint ---
 
