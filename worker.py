@@ -12,7 +12,7 @@ import pytz
 
 import feedparser
 import httpx
-from newspaper import Article
+from readability import Document
 from dotenv import load_dotenv
 import asyncpg
 import asyncio
@@ -114,6 +114,48 @@ def format_datetime(dt_input, source_name=None):
         return dt_display.strftime("Yesterday at %I:%M %p") + f" ({tz_abbr})"
     else:
         return dt_display.strftime("%b %d, %Y - %I:%M %p") + f" ({tz_abbr})"
+
+
+async def extract_article_content_with_readability(url: str) -> str:
+    """
+    Extract article content using readability-lxml.
+    
+    Args:
+        url: Article URL to extract content from
+        
+    Returns:
+        Cleaned HTML content or None on error
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'},
+                timeout=10.0,
+                follow_redirects=True
+            )
+            response.raise_for_status()
+        
+        # Use readability to extract main content
+        # Pass response.text (string) instead of response.content (bytes) to avoid regex errors
+        doc = Document(response.text)
+        # keep_all_images=True ensures all inline images in the main article body are preserved
+        content_html = doc.summary(keep_all_images=True)
+        
+        if not content_html or content_html.strip() == "":
+            return None
+        
+        return content_html.strip()
+        
+    except httpx.TimeoutException:
+        logger.warning(f"Timeout extracting content from {url}")
+        return None
+    except httpx.HTTPStatusError as e:
+        logger.warning(f"HTTP error {e.response.status_code} extracting content from {url}")
+        return None
+    except Exception as e:
+        logger.warning(f"Error extracting content with readability for {url}: {e}")
+        return None
 
 
 async def send_ntfy_notification(title: str, link: str, description: str, category: str, source: str):
@@ -289,7 +331,7 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
     Parse and store RSS feed articles with HTTP caching support.
     
     Args:
-        fetch_full_content: If True, extract full article content using newspaper. If False, only store feed summary.
+        fetch_full_content: If True, extract full article content using readability. If False, only store feed summary.
     
     Returns:
         tuple: (new_etag, new_last_modified, articles_added)
@@ -360,11 +402,11 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 article_content = None
                 if fetch_full_content:
                     try:
-                        art = Article(link, keep_article_html=True)
-                        art.download()
-                        art.parse()
-                        article_content = art.article_html or art.text
-                        logger.debug(f"Extracted full content for: {title}")
+                        article_content = await extract_article_content_with_readability(link)
+                        if article_content:
+                            logger.debug(f"Extracted full content for: {title}")
+                        else:
+                            logger.warning(f"No content extracted for {link}")
                     except Exception as e:
                         logger.warning(f"Error extracting content for {link}: {e}")
                         article_content = None
