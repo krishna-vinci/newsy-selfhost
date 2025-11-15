@@ -5,10 +5,10 @@ services:
       dockerfile: Dockerfile
       target: development
     ports:
-      - "8324:8324"
+      - "3456:3456"
     environment:
       - NODE_ENV=development
-      - API_BASE_URL=http://newsy-backend:8321
+      - API_BASE_URL=http://newsy-backend:8765
     restart: unless-stopped
     networks:
       - db-net
@@ -28,13 +28,13 @@ services:
       context: .
       dockerfile: dockerfile
     ports:
-      - "8321:8321"
+      - "8765:8765"
     env_file:
       - .env
     volumes:
       - backup_data:/app/data/backups
       - reports_data:/app/reports
-    command: ["fastapi", "dev", "main.py", "--host", "0.0.0.0", "--port", "8321"]
+    command: ["fastapi", "dev", "main.py", "--host", "0.0.0.0", "--port", "8765"]
     develop:
       watch:
         - action: sync
@@ -51,22 +51,39 @@ services:
       - newsy_db
       - newsy-redis
 
-  newsy-worker:
-    build: .
-    env_file:
-      - .env
+  go-scheduler:
+    build:
+      context: ./scheduler
+      dockerfile: Dockerfile
+    ports:
+      - "8667:8667"
     environment:
-      - WORKER_COUNT=4  # Number of workers in single container
+      - DB_HOST=newsy_db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=1122
+      - DB_NAME=newsy
+      - PYTHON_BACKEND_URL=http://newsy-backend:8765
+      - WORKER_POOL_SIZE=100
+      - POLLING_FREQUENCY=1m
+      - BATCH_SIZE=100
+      - POLLING_ERROR_LIMIT=10
+      - POLLING_LIMIT_PER_HOST=5
+      - CLEANUP_FREQUENCY=24h
+      - SERVER_PORT=8667
+      - LOG_LEVEL=info
     restart: unless-stopped
     networks:
       - db-net
     depends_on:
       - newsy_db
-      - newsy-redis
       - newsy-backend
-    command: bash /app/start_workers.sh
-    # Single container running 4 workers (uses ~400MB total)
-    # Alternative: Use deploy.replicas: 4 for separate containers
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8667/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   newsy_db:
     image: postgres:alpine

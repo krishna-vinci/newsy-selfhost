@@ -12,10 +12,10 @@ RUN npm install
 COPY . .
 
 # Expose the Vite development server port.
-EXPOSE 8324
+EXPOSE 3456
 
 # Start the Vite development server, making it accessible outside the container.
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "8324"]
+CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "3456"]
 
 
 # ------------------- Build Stage (Builder) -------------------
@@ -39,11 +39,11 @@ RUN npm install --omit=dev
 COPY --from=builder /app/build ./build
 
 # Expose the application port.
-EXPOSE 8324
+EXPOSE 3456
 
 # Set production environment variables.
 ENV NODE_ENV=production
-ENV PORT=8324
+ENV PORT=3456
 
 # Start the production server.
 CMD ["node", "build"]
