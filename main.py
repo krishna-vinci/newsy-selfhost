@@ -11,8 +11,7 @@ import feedparser
 import httpx
 import markdown2
 import html2text
-from newspaper import Article
-from bs4 import BeautifulSoup
+from readability import Document
 from markdown_it import MarkdownIt
 
 from dotenv import load_dotenv
@@ -205,6 +204,48 @@ def sanitize_text(text):
     normalized = unicodedata.normalize('NFKD', text)
     return normalized.encode('latin1', 'ignore').decode('latin1')
 
+
+async def extract_article_content_with_readability(url: str) -> str:
+    """
+    Extract article content using readability-lxml.
+    
+    Args:
+        url: Article URL to extract content from
+        
+    Returns:
+        Cleaned HTML content or error message
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                url,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'},
+                timeout=10.0,
+                follow_redirects=True
+            )
+            response.raise_for_status()
+        
+        # Use readability to extract main content
+        # Pass response.text (string) instead of response.content (bytes) to avoid regex errors
+        doc = Document(response.text)
+        # keep_all_images=True ensures all inline images in the main article body are preserved
+        content_html = doc.summary(keep_all_images=True)
+        
+        if not content_html or content_html.strip() == "":
+            return "<p>No content could be extracted.</p>"
+        
+        return content_html.strip()
+        
+    except httpx.TimeoutException:
+        logging.error(f"Timeout extracting content from {url}")
+        return "<p>Request timed out while fetching article.</p>"
+    except httpx.HTTPStatusError as e:
+        logging.error(f"HTTP error {e.response.status_code} extracting content from {url}")
+        return f"<p>Failed to fetch article (HTTP {e.response.status_code}).</p>"
+    except Exception as e:
+        logging.exception(f"Error extracting content with readability for {url}: {e}")
+        return f"<p>Error extracting content: {str(e)}</p>"
+
 async def send_ntfy_notification(title: str, link: str, description: str, category: str, source: str):
     # Check if ntfy is enabled for this category
     try:
@@ -356,7 +397,6 @@ import logging
 import httpx
 import feedparser
 from dateutil import parser as date_parser
-from newspaper import Article
 
 # Indian Standard Time
 IST = pytz.timezone("Asia/Kolkata")
@@ -473,10 +513,7 @@ async def parse_and_store_rss_feed(feed_id: int, rss_url: str, category: str, so
                 continue
 
             try:
-                art = await run_in_threadpool(lambda: Article(link, keep_article_html=True))
-                await run_in_threadpool(art.download)
-                await run_in_threadpool(art.parse)
-                article_content = art.article_html or art.text
+                article_content = await extract_article_content_with_readability(link)
             except Exception:
                 logging.exception("Error extracting content for %s", link)
                 article_content = None
@@ -1973,14 +2010,8 @@ async def article_full_text(url: str):
         await database.release_db_connection(conn)
 
         if not content_html:
-            # Fallback to fetching live if not in DB
-            a = await run_in_threadpool(lambda: Article(url, keep_article_html=True))
-            await run_in_threadpool(a.download)
-            await run_in_threadpool(a.parse)
-            content_html = a.article_html.strip() if a.article_html else ""
-            if not content_html and a.text:
-                # If no HTML, create basic paragraphs from text
-                content_html = "<p>" + a.text.replace('\n', '</p><p>') + "</p>"
+            # Fallback to fetching live if not in DB using readability
+            content_html = await extract_article_content_with_readability(url)
 
         if content_html:
             content_html = convert_links_to_embeds(content_html)
@@ -2003,15 +2034,15 @@ async def article_full_text(url: str):
 
 @app.get("/api/article-full-html")
 async def article_full_html(url: str):
+    """
+    Fetch and return raw HTML content of an article using readability.
+    This endpoint returns unformatted HTML for direct use.
+    """
     try:
-        a = await run_in_threadpool(lambda: Article(url, keep_article_html=True))
-        await run_in_threadpool(a.download)
-        await run_in_threadpool(a.parse)
-        content_html = a.article_html.strip() if a.article_html else ""
-        if not content_html:
-            content_html = "<p>" + a.text.replace("\n", "</p><p>") + "</p>"
+        content_html = await extract_article_content_with_readability(url)
         return JSONResponse({"html": content_html})
     except Exception as e:
+        logging.exception(f"Error fetching full HTML for {url}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.put("/api/feed/{feed_id}")

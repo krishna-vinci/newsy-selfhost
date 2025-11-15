@@ -6,19 +6,28 @@ export const handle: Handle = async ({ event, resolve }) => {
 	// Proxy API requests to the backend
 	if (event.url.pathname.startsWith('/api')) {
 		const targetUrl = `${API_BASE_URL}${event.url.pathname}${event.url.search}`;
-		
+
 		try {
-			const response = await fetch(targetUrl, {
+			// For file uploads (multipart/form-data), we need to read the body as arrayBuffer
+			// to preserve the binary data and boundary markers
+			let body: BodyInit | undefined = undefined;
+			
+			if (event.request.method !== 'GET' && event.request.method !== 'HEAD') {
+				// Read the body as arrayBuffer to preserve binary data for file uploads
+				body = await event.request.arrayBuffer();
+			}
+
+			const proxiedRequest = new Request(targetUrl, {
 				method: event.request.method,
 				headers: event.request.headers,
-				body: event.request.method !== 'GET' && event.request.method !== 'HEAD' 
-					? await event.request.text() 
-					: undefined
+				body: body,
+				redirect: 'manual'
 			});
 
-			// Create a new response with the proxied data
-			const responseBody = await response.text();
-			return new Response(responseBody, {
+			const response = await fetch(proxiedRequest);
+
+			// Return the response as-is
+			return new Response(response.body, {
 				status: response.status,
 				statusText: response.statusText,
 				headers: response.headers
