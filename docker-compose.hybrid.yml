@@ -1,0 +1,101 @@
+services:
+  newsy-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+    ports:
+      - "3456:3456"
+    environment:
+      - NODE_ENV=production
+      - API_BASE_URL=http://newsy-backend:8765
+    restart: unless-stopped
+    networks:
+      - db-net
+      - caddy-net
+    depends_on:
+      - newsy-backend
+
+  newsy-backend:
+    build: .
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    volumes:
+      - backup_data:/app/data/backups
+      - reports_data:/app/reports
+    restart: unless-stopped
+    networks:
+      - db-net
+      - caddy-net
+    depends_on:
+      - newsy_db
+      - newsy-redis
+
+  go-scheduler:
+    build:
+      context: ./scheduler
+      dockerfile: Dockerfile
+    ports:
+      - "8667:8667"
+    environment:
+      - DB_HOST=newsy_db
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=1122
+      - DB_NAME=newsy
+      - PYTHON_BACKEND_URL=http://newsy-backend:8765
+      - WORKER_POOL_SIZE=100
+      - POLLING_FREQUENCY=1m
+      - BATCH_SIZE=100
+      - POLLING_ERROR_LIMIT=10
+      - POLLING_LIMIT_PER_HOST=5
+      - CLEANUP_FREQUENCY=24h
+      - SERVER_PORT=8667
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    networks:
+      - db-net
+    depends_on:
+      - newsy_db
+      - newsy-backend
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8667/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  newsy_db:
+    image: postgres:alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=1122
+      - POSTGRES_DB=newsy
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - db-net
+    restart: unless-stopped
+
+  newsy-redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - db-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  backup_data:
+  reports_data:
+
+networks:
+  db-net:
+    external: true  # Make sure this is already created: docker network create db-net
+  caddy-net:
+    external: true

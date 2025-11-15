@@ -62,6 +62,7 @@ import database  # Import database module
 import ai_filter  # Import AI filtering module
 import keyword_filter  # Import keyword/topic filtering module
 import cache  # Import cache module
+import internal_api  # Import internal API for Go scheduler
 from youtube_embed import convert_links_to_embeds
 
 load_dotenv()  # Load environment variables
@@ -138,6 +139,9 @@ app.include_router(reports.router)
 
 # Include backup/restore/export router
 app.include_router(backup_restore.router)
+
+# Include internal API router for Go scheduler
+app.include_router(internal_api.router)
 
 
 def truncate_words(text, max_words=100):
@@ -1096,21 +1100,20 @@ async def startup_event():
     # Build initial search index
     asyncio.create_task(build_search_index())
     
-    # ===== NEW SCALABLE ARCHITECTURE =====
+    # ===== DISABLED: Go scheduler now handles feed enqueuing =====
     # Single batch scheduler job runs every minute to enqueue due feeds
-    scheduler.add_job(enqueue_due_feeds, 'interval', minutes=1, id='batch_feed_scheduler')
-    logging.info("Batch feed scheduler initialized (runs every 1 minute)")
+    # scheduler.add_job(enqueue_due_feeds, 'interval', minutes=1, id='batch_feed_scheduler')
+    # logging.info("Batch feed scheduler initialized (runs every 1 minute)")
+    # asyncio.create_task(enqueue_due_feeds())  # Trigger initial feed enqueue
+    logging.info("Feed scheduling is now handled by Go scheduler service")
     
-    # Other scheduled jobs
+    # Other scheduled jobs (kept in Python)
     scheduler.add_job(cleanup_old_articles, 'cron', hour=0)  # Run daily at midnight
     scheduler.add_job(build_search_index, 'interval', minutes=5)  # Update search index every 5 minutes
     scheduler.start()
     
     # Load and schedule reports
     await reports.load_and_schedule_reports(scheduler)
-    
-    # Trigger initial feed enqueue
-    asyncio.create_task(enqueue_due_feeds())
 
 @app.on_event("shutdown")
 async def shutdown_event():
