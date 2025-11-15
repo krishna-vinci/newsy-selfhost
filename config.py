@@ -13,7 +13,7 @@ class Config:
     DB_PORT = os.getenv("DB_PORT")
     
     # FastAPI Settings
-    FASTAPI_HOST_PORT = os.getenv("FASTAPI_HOST_PORT", "8666")
+    FASTAPI_HOST_PORT = os.getenv("FASTAPI_HOST_PORT", "8765")
     
     # Redis Settings
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
@@ -43,7 +43,7 @@ class Config:
     OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
 
     # CORS Settings
-    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(',')
+    CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3456,http://127.0.0.1:3456,http://localhost:8667,http://go-scheduler:8667").split(',')
     
     # Cache Settings
     CACHE_ENABLED = os.getenv("CACHE_ENABLED", "true").lower() == "true"
