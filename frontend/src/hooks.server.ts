@@ -1,6 +1,6 @@
 import type { Handle } from '@sveltejs/kit';
 
-const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:8321';
+const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:8765';
 
 export const handle: Handle = async ({ event, resolve }) => {
 	// Proxy API requests to the backend
