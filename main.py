@@ -2696,8 +2696,8 @@ Content: {clean_text}"""
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                max_tokens=200,
-                temperature=0.5
+                max_tokens=Config.OPENAI_MAX_TOKENS,
+                temperature=Config.OPENAI_TEMPERATURE
             )
             
             summary = response.choices[0].message.content.strip()
