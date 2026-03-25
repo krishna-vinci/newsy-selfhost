@@ -1,6 +1,7 @@
 <script lang="ts">
 import { onMount } from 'svelte';
-import { goto } from '$app/navigation';
+import { goto, invalidateAll } from '$app/navigation';
+import { page } from '$app/stores';
 import { toast } from 'svelte-sonner';
 import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import * as Sidebar from '$lib/components/ui/sidebar/index.js';
@@ -11,10 +12,9 @@ import * as Select from '$lib/components/ui/select/index.js';
 import * as Switch from '$lib/components/ui/switch/index.ts';
 import * as Tabs from '$lib/components/ui/tabs/index.js';
 import * as Dialog from '$lib/components/ui/dialog/index.ts';
-import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash, CheckCircle, Star, Check } from '@lucide/svelte';
-import SocialIcons from '@rodneylab/svelte-social-icons';
+import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash, CheckCircle, Star, Check, LogOut } from '@lucide/svelte';
 import { dndzone } from 'svelte-dnd-action';
-import { settings } from '$lib/stores/settings';
+import { settings } from '$lib/stores/settings.ts';
 
 
 type Feed = {
@@ -59,6 +59,8 @@ onconfigchanged?: () => void;
 selectedCategory?: string;
 selectedFeedUrl?: string | null;
 } = $props();
+
+const sidebar = Sidebar.useSidebar();
 
 // State
 let feedConfig = $state<FeedConfig>({});
@@ -279,6 +281,9 @@ function openEditModal(feed: Feed, category: string) {
 	};
 	editingFeedCategory = category;
 	showEditFeedModal = true;
+	if (sidebar.isMobile) {
+		sidebar.setOpenMobile(false);
+	}
 }
 
 function closeEditModal() {
@@ -379,9 +384,14 @@ async function markAllFeedAsRead(feedUrl: string, feedName: string, event: Event
 // Category Settings Functions
 function openCategorySettings() {
 	loadCategories();
-	loadBackups(); // Load backups when opening settings
+	if ($page.data.auth?.isAdmin) {
+		loadBackups(); // Load backups when opening settings
+	}
 	activeTab = 'categories'; // Reset to categories tab
 	showCategorySettingsModal = true;
+	if (sidebar.isMobile) {
+		sidebar.setOpenMobile(false);
+	}
 }
 
 function closeCategorySettings() {
@@ -841,12 +851,31 @@ async function importOPML(event: Event) {
 	input.value = '';
 }
 
+async function signOut() {
+	try {
+		await fetch('/api/auth/sign-out', { method: 'POST' });
+		if (sidebar.isMobile) {
+			sidebar.setOpenMobile(false);
+		}
+		await invalidateAll();
+		await goto('/login');
+	} catch (error) {
+		toast.error('Failed to log out');
+	}
+}
+
 function handleCategoryClick(category: string) {
 	onCategorySelect(category);
+	if (sidebar.isMobile) {
+		sidebar.setOpenMobile(false);
+	}
 }
 
 function handleFeedClick(feedUrl: string, feedName: string) {
 	onFeedSelect(feedUrl, feedName);
+	if (sidebar.isMobile) {
+		sidebar.setOpenMobile(false);
+	}
 }
 
 // Lifecycle
@@ -906,31 +935,32 @@ $effect(() => {
 			<Sidebar.Group class="py-0">
 				<Sidebar.GroupLabel class="py-1.5 px-0">
 				{@const categoryData = categoriesList.find(c => c.name === category)}
-				<button
-					type="button"
-					onclick={() => toggleCategory(category)}
-					class="flex w-full items-center justify-between hover:text-foreground group px-2 py-1 rounded {selectedCategory === category ? 'bg-accent' : ''}"
-				>
-					<div class="flex items-center gap-2 flex-1 min-w-0">
-						<ChevronDown
-							class="h-4 w-4 transition-transform shrink-0 {expandedCategories.has(category) ? '' : '-rotate-90'}"
-						/>
-						<span
-							onclick={(e) => {
-								e.stopPropagation();
-								handleCategoryClick(category);
-							}}
-							class="text-sm font-semibold truncate {selectedCategory === category ? 'text-foreground' : 'text-foreground/90'}"
+				<div class="flex w-full items-center justify-between gap-2 px-2 py-1 rounded hover:text-foreground group {selectedCategory === category ? 'bg-accent' : ''}">
+					<div class="flex min-w-0 flex-1 items-center gap-2">
+						<button
+							type="button"
+							onclick={() => toggleCategory(category)}
+							class="flex h-8 w-8 shrink-0 items-center justify-center rounded hover:bg-accent"
+							aria-label={expandedCategories.has(category) ? `Collapse ${category}` : `Expand ${category}`}
+						>
+							<ChevronDown
+								class="h-4 w-4 transition-transform {expandedCategories.has(category) ? '' : '-rotate-90'}"
+							/>
+						</button>
+						<button
+							type="button"
+							onclick={() => handleCategoryClick(category)}
+							class="truncate text-left text-sm font-semibold {selectedCategory === category ? 'text-foreground' : 'text-foreground/90'}"
 						>
 							{category}
-						</span>
+						</button>
 					</div>
 					{#if categoryData && categoryData.unread_count !== undefined}
 						<span class="text-xs text-muted-foreground font-normal shrink-0 ml-auto">
 							{categoryData.unread_count}/{categoryData.total_count}
 						</span>
 					{/if}
-				</button>
+				</div>
 			</Sidebar.GroupLabel>
 
 					{#if expandedCategories.has(category)}
@@ -945,14 +975,15 @@ $effect(() => {
 												disabled={isSaving}
 												class="shrink-0"
 											/>
-											<div class="flex items-center gap-2 flex-1 min-w-0">
-												<span
-													onclick={() => handleFeedClick(feed.url, feed.name)}
-													class="cursor-pointer text-sm truncate {selectedFeedUrl === feed.url ? 'font-semibold text-foreground' : (feed.isActive ? 'text-foreground/90' : 'text-muted-foreground line-through')}"
-												>
-													{feed.name}
-												</span>
-											</div>
+										<div class="flex items-center gap-2 flex-1 min-w-0">
+											<button
+												type="button"
+												onclick={() => handleFeedClick(feed.url, feed.name)}
+												class="cursor-pointer truncate text-left text-sm {selectedFeedUrl === feed.url ? 'font-semibold text-foreground' : (feed.isActive ? 'text-foreground/90' : 'text-muted-foreground line-through')}"
+											>
+												{feed.name}
+											</button>
+										</div>
 											{#if feed.unread_count !== undefined && feed.unread_count > 0}
 												<button
 													onclick={(e) => markAllFeedAsRead(feed.url, feed.name, e)}
@@ -989,7 +1020,12 @@ $effect(() => {
 	<!-- Footer with Buttons -->
 	<Sidebar.Footer>
 		<div class="flex flex-col gap-2">
-			<Button onclick={() => (showAddFeedModal = true)} variant="outline" size="sm" class="w-full">
+			<Button onclick={() => {
+				showAddFeedModal = true;
+				if (sidebar.isMobile) {
+					sidebar.setOpenMobile(false);
+				}
+			}} variant="outline" size="sm" class="w-full">
 				<Plus class="mr-2 h-4 w-4" />
 				Add Feed
 			</Button>
@@ -997,6 +1033,15 @@ $effect(() => {
 				<Settings class="mr-2 h-4 w-4" />
 				Settings
 			</Button>
+			{#if $page.data.auth?.user}
+				<div class="flex items-center gap-2 rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-sm">
+					<div class="min-w-0 flex-1 truncate font-medium">{$page.data.auth.user.username}</div>
+					<Button onclick={signOut} variant="ghost" size="sm" class="h-8 px-2 text-muted-foreground hover:text-foreground">
+						<LogOut class="mr-1 h-4 w-4" />
+						Logout
+					</Button>
+				</div>
+			{/if}
 		</div>
 	</Sidebar.Footer>
 </Sidebar.Root>
@@ -1009,7 +1054,7 @@ $effect(() => {
 			if (e.target === e.currentTarget) closeEditModal();
 		}}
 	>
-		<div class="w-full max-w-md rounded-lg bg-card p-6 shadow-lg">
+		<div class="mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-lg bg-card p-4 shadow-lg sm:p-6">
 			<h3 class="mb-4 text-lg font-semibold">Edit Feed</h3>
 			<div class="space-y-4">
 				<div>
@@ -1092,18 +1137,19 @@ $effect(() => {
 					</label>
 				</div>
 			</div>
-			<div class="mt-6 flex justify-between gap-2">
+			<div class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
 				<Button 
 					variant="destructive" 
 					onclick={() => editingFeed && deleteFeed(editingFeed.id)}
 					disabled={isSaving}
+					class="w-full sm:w-auto"
 				>
 					<Trash2 class="mr-2 h-4 w-4" />
 					Delete Feed
 				</Button>
-				<div class="flex gap-2">
-					<Button variant="outline" onclick={closeEditModal}>Cancel</Button>
-					<Button onclick={updateFeed} disabled={isSaving}>
+				<div class="flex flex-col gap-2 sm:flex-row">
+					<Button variant="outline" onclick={closeEditModal} class="w-full sm:w-auto">Cancel</Button>
+					<Button onclick={updateFeed} disabled={isSaving} class="w-full sm:w-auto">
 						{#if isSaving}
 							<Loader2 class="mr-2 h-4 w-4 animate-spin" />
 						{/if}
@@ -1259,7 +1305,7 @@ $effect(() => {
     <Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
     <Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
     <Tabs.Trigger value="preferences">Preferences</Tabs.Trigger>
-    <Tabs.Trigger value="backup">Backup & Export</Tabs.Trigger>
+    <Tabs.Trigger value="backup">{$page.data.auth?.isAdmin ? 'Backup & Export' : 'Data Export'}</Tabs.Trigger>
 </Tabs.List>
         <Tabs.Content value="categories" class="mt-4 min-h-[300px] sm:min-h-[400px]">
           <div
@@ -1331,7 +1377,7 @@ $effect(() => {
                       <span class="text-xs text-muted-foreground min-w-[24px]">{category.ntfy_enabled ? 'On' : 'Off'}</span>
                     </div>
 									<div class="flex items-center gap-2">
-										<SocialIcons network="telegram" alt="" fgColor="#888888" bgColor="transparent" width="24" height="24" />
+									<span class="text-xs font-semibold text-muted-foreground">TG</span>
 										<Dialog.Root>
 											<Dialog.Trigger>
 												<Switch.Switch 
@@ -1559,63 +1605,65 @@ $effect(() => {
 </Tabs.Content>
         <Tabs.Content value="backup" class="mt-4 min-h-[400px]">
           <div class="space-y-6 p-4">
-            <!-- Database Backups Section -->
-            <div class="space-y-4">
-              <div class="flex items-center justify-between">
-                <div>
-                  <h4 class="text-sm font-semibold flex items-center gap-2">
-                    <Database class="h-4 w-4" />
-                    Database Backups
-                  </h4>
-                  <p class="text-xs text-muted-foreground mt-1">
-                    Create and manage full database backups for disaster recovery
-                  </p>
+            {#if $page.data.auth?.isAdmin}
+              <!-- Database Backups Section -->
+              <div class="space-y-4">
+                <div class="flex items-center justify-between">
+                  <div>
+                    <h4 class="text-sm font-semibold flex items-center gap-2">
+                      <Database class="h-4 w-4" />
+                      Database Backups
+                    </h4>
+                    <p class="text-xs text-muted-foreground mt-1">
+                      Create and manage full database backups for disaster recovery
+                    </p>
+                  </div>
+                  <Button onclick={createBackup} disabled={isCreatingBackup} size="sm" class="gap-2">
+                    {#if isCreatingBackup}
+                      <Loader2 class="h-4 w-4 animate-spin" />
+                      Creating...
+                    {:else}
+                      <Plus class="h-4 w-4" />
+                      Create Backup
+                    {/if}
+                  </Button>
                 </div>
-                <Button onclick={createBackup} disabled={isCreatingBackup} size="sm" class="gap-2">
-                  {#if isCreatingBackup}
-                    <Loader2 class="h-4 w-4 animate-spin" />
-                    Creating...
-                  {:else}
-                    <Plus class="h-4 w-4" />
-                    Create Backup
-                  {/if}
-                </Button>
-              </div>
 
-              {#if activeTab === 'backup'}
-                {#if !backups.length && !isLoadingBackups}
-                  <div class="rounded-md border border-dashed p-8 text-center">
-                    <Database class="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
-                    <p class="text-sm text-muted-foreground">No backups available</p>
-                    <p class="text-xs text-muted-foreground mt-1">Create your first backup to get started</p>
-                  </div>
-                {:else}
-                  <div class="space-y-2 max-h-[200px] overflow-y-auto">
-                    {#each backups as backup}
-                      <div class="flex items-center justify-between rounded-md border p-3 bg-background">
-                        <div class="flex-1 min-w-0">
-                          <p class="text-sm font-medium truncate">{backup.filename}</p>
-                          <p class="text-xs text-muted-foreground">
-                            {new Date(backup.created_at).toLocaleString()} • {backup.size_mb} MB
-                          </p>
+                {#if activeTab === 'backup'}
+                  {#if !backups.length && !isLoadingBackups}
+                    <div class="rounded-md border border-dashed p-8 text-center">
+                      <Database class="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+                      <p class="text-sm text-muted-foreground">No backups available</p>
+                      <p class="text-xs text-muted-foreground mt-1">Create your first backup to get started</p>
+                    </div>
+                  {:else}
+                    <div class="space-y-2 max-h-[200px] overflow-y-auto">
+                      {#each backups as backup}
+                        <div class="flex items-center justify-between rounded-md border p-3 bg-background">
+                          <div class="flex-1 min-w-0">
+                            <p class="text-sm font-medium truncate">{backup.filename}</p>
+                            <p class="text-xs text-muted-foreground">
+                              {new Date(backup.created_at).toLocaleString()} • {backup.size_mb} MB
+                            </p>
+                          </div>
+                          <div class="flex items-center gap-1 ml-2">
+                            <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => downloadBackup(backup.filename)}>
+                              <Download class="h-4 w-4" />
+                            </Button>
+                            <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => restoreBackup(backup.filename)} disabled={isRestoringBackup}>
+                              <Upload class="h-4 w-4" />
+                            </Button>
+                            <Button variant="ghost" size="icon" class="h-8 w-8 text-destructive" onclick={() => deleteBackup(backup.filename)}>
+                              <Trash class="h-4 w-4" />
+                            </Button>
+                          </div>
                         </div>
-                        <div class="flex items-center gap-1 ml-2">
-                          <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => downloadBackup(backup.filename)}>
-                            <Download class="h-4 w-4" />
-                          </Button>
-                          <Button variant="ghost" size="icon" class="h-8 w-8" onclick={() => restoreBackup(backup.filename)} disabled={isRestoringBackup}>
-                            <Upload class="h-4 w-4" />
-                          </Button>
-                          <Button variant="ghost" size="icon" class="h-8 w-8 text-destructive" onclick={() => deleteBackup(backup.filename)}>
-                            <Trash class="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
+                      {/each}
+                    </div>
+                  {/if}
                 {/if}
-              {/if}
-            </div>
+              </div>
+            {/if}
 
             <!-- Data Export Section -->
             <div class="space-y-4 pt-4 border-t">

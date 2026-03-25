@@ -104,12 +104,32 @@ let showShortcutsModal = $state(false);
 // Search input reference for keyboard shortcuts
 let searchInputRef: HTMLInputElement | null = null;
 
+// Thumbnail fallback state
+let failedThumbnails = $state<Set<string>>(new Set());
+
 // Real-time updates state
 let lastCheckTimestamp = $state<string>(new Date().toISOString());
 let newArticlesCount = $state<number>(0);
 let newArticlesByCategory = $state<Record<string, number>>({});
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
 let unsubscribe: () => void;
+
+function hasThumbnail(article: FeedItem): boolean {
+	return Boolean(article.thumbnail) && !failedThumbnails.has(article.link);
+}
+
+function markThumbnailFailed(articleLink: string) {
+	failedThumbnails = new Set([...failedThumbnails, articleLink]);
+}
+
+function getSourceInitials(source: string | null | undefined): string {
+	return (source || '')
+		.split(/\s+/)
+		.filter(Boolean)
+		.slice(0, 2)
+		.map((part) => part[0]?.toUpperCase() ?? '')
+		.join('');
+}
 
 // Helper function to merge articles with read statuses
 function mergeWithReadStatus(articles: FeedItem[]): FeedItem[] {
@@ -891,10 +911,10 @@ onDestroy(() => {
 <div class="w-full h-full overflow-auto">
 <div class="px-4 py-4 sm:px-6 sm:py-6 md:px-8 md:py-8">
 <!-- Header -->
-<div class="mb-6 md:mb-8 flex flex-col gap-3 md:gap-4">
-	<div class="flex flex-wrap items-center justify-between gap-3 md:gap-4">
-		<div class="flex items-center gap-2 min-w-0">
-			<Sidebar.Trigger />
+<div class="mb-6 flex flex-col gap-3 md:mb-8 md:gap-4">
+	<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-4">
+		<div class="flex min-w-0 items-center gap-2">
+			<Sidebar.Trigger class="shrink-0" />
 			<h1 class="text-xl sm:text-2xl font-bold truncate">
 				{selectedFeedUrl && selectedFeedName ? selectedFeedName : (selectedCategory === 'all' ? 'All Feeds' : selectedCategory)}
 			</h1>
@@ -905,14 +925,14 @@ onDestroy(() => {
 			{/if}
 		</div>
 
-		<div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full md:w-auto md:shrink-0">
+		<div class="flex w-full flex-wrap items-center gap-2 sm:gap-3 md:w-auto md:shrink-0">
 			<!-- New Articles Indicator -->
 			{#if newArticlesCount > 0}
 				<Button
 					variant="outline"
 					size="sm"
 					onclick={refreshToShowNewArticles}
-					class="flex items-center gap-2 bg-primary/10 hover:bg-primary/20 border-primary/30"
+					class="w-full sm:w-auto flex items-center gap-2 bg-primary/10 hover:bg-primary/20 border-primary/30"
 				>
 					<Bell class="size-4" />
 					<span class="font-medium">{newArticlesCount} new</span>
@@ -920,7 +940,7 @@ onDestroy(() => {
 			{/if}
 			
 			<!-- Search Input -->
-			<div class="relative w-full md:w-64 order-first md:order-none">
+			<div class="relative order-first w-full md:order-none md:w-64">
 				<Search class="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
 				<Input
 					type="text"
@@ -950,7 +970,7 @@ onDestroy(() => {
 					onclick={generateStarredReport}
 					disabled={isGeneratingReport}
 					aria-label="Generate starred report"
-					class="hidden sm:flex"
+					class="w-full sm:w-auto"
 				>
 					<FileText class="size-4 mr-2" />
 					{isGeneratingReport ? 'Generating...' : 'Generate Report'}
@@ -1003,7 +1023,7 @@ onDestroy(() => {
 			</div>
 
 			<!-- View Mode Toggle -->
-			<div class="flex gap-2">
+			<div class="ml-auto flex gap-2 sm:ml-0">
 				<Button
 					variant={viewMode === 'card' ? 'default' : 'outline'}
 					size="icon"
@@ -1062,21 +1082,41 @@ onDestroy(() => {
 		<!-- Card View -->
 		<div class="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 sm:gap-6">
 			{#each filteredArticles as article}
-				<Card class="group flex flex-col overflow-hidden transition-all hover:shadow-lg {article.is_read ? 'opacity-60' : ''}">
+				<Card class="group flex flex-col overflow-hidden p-4 transition-all hover:shadow-lg sm:p-6 {article.is_read ? 'opacity-60' : ''}">
 					<div class="flex flex-grow flex-col gap-4">
-						{#if article.thumbnail}
-							<div class="relative -mt-6 -mx-6 overflow-hidden rounded-t-xl">
+					{#if hasThumbnail(article)}
+							<div class="relative -mx-4 -mt-4 overflow-hidden rounded-t-xl sm:-mx-6 sm:-mt-6">
 								<img
 									src={article.thumbnail}
 									alt={article.title}
 									class="h-48 w-full object-cover transition-transform duration-300 group-hover:scale-105"
 									onerror={(e) => {
-										(e.currentTarget as HTMLImageElement).src = '/default-thumbnail.jpg';
+										markThumbnailFailed(article.link);
 									}}
 								/>
 							</div>
-						{/if}
-						<div class="flex flex-grow flex-col justify-between gap-3 px-6">
+						{:else}
+							<div class="relative -mx-4 -mt-4 overflow-hidden rounded-t-xl border-b bg-gradient-to-br from-muted/80 via-muted/45 to-background sm:-mx-6 sm:-mt-6">
+								<div class="flex h-48 flex-col justify-between p-4">
+									<div class="flex items-center justify-between gap-3 text-muted-foreground/80">
+										<span class="truncate rounded-full border border-border/70 bg-background/70 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.22em]">
+											{article.source}
+										</span>
+										<FileText class="size-4 shrink-0" />
+									</div>
+									<div class="flex items-end justify-between gap-4">
+										<div>
+											<div class="text-3xl font-semibold tracking-tight text-foreground/75">{getSourceInitials(article.source) || 'NS'}</div>
+											<div class="mt-1 text-xs uppercase tracking-[0.25em] text-muted-foreground">Article</div>
+										</div>
+										<div class="rounded-full border border-border/70 bg-background/80 p-2 shadow-sm">
+											<FileText class="size-4 text-muted-foreground" />
+										</div>
+									</div>
+								</div>
+							</div>
+					{/if}
+						<div class="flex flex-grow flex-col justify-between gap-3">
 							<div>
 								<div class="flex items-center gap-2">
 									<Badge variant="secondary">{article.source}</Badge>
@@ -1259,15 +1299,22 @@ onDestroy(() => {
 						}}
 					>
 						<div class="flex items-start gap-4 px-6 py-4">
-							{#if article.thumbnail}
-							<img
-								src={article.thumbnail}
-								alt={article.title}
-								class="h-12 w-16 sm:h-16 sm:w-24 shrink-0 rounded-md object-cover"
-									onerror={(e) => {
-										(e.currentTarget as HTMLImageElement).src = '/default-thumbnail.jpg';
+							{#if hasThumbnail(article)}
+								<img
+									src={article.thumbnail}
+									alt={article.title}
+									class="h-12 w-16 sm:h-16 sm:w-24 shrink-0 rounded-md object-cover"
+									onerror={() => {
+										markThumbnailFailed(article.link);
 									}}
 								/>
+							{:else}
+								<div class="flex h-12 w-16 shrink-0 items-center justify-center rounded-md border border-border/60 bg-gradient-to-br from-muted/80 via-muted/45 to-background sm:h-16 sm:w-24">
+									<div class="flex flex-col items-center gap-1 text-muted-foreground/85">
+										<div class="text-[10px] font-semibold uppercase tracking-[0.18em]">{getSourceInitials(article.source) || 'NS'}</div>
+										<FileText class="size-3.5 sm:size-4" />
+									</div>
+								</div>
 							{/if}
 							<div class="flex min-w-0 flex-1 flex-col gap-2">
 								<div class="flex items-center gap-2">
@@ -1413,29 +1460,31 @@ onDestroy(() => {
 {#if selectedArticle}
 	<Dialog bind:open={modalOpen} title={selectedArticle.title}>
 		<div class="flex flex-col gap-4">
-			<div class="flex items-center gap-2">
-				<Badge variant="secondary">{selectedArticle.source}</Badge>
-				<span class="text-xs text-muted-foreground">{formatPublishedDate(selectedArticle.published_datetime, timezone)}</span>
-				<div class="ml-auto flex gap-2">
-					<Button
-						variant="outline"
-						size="sm"
-						onclick={() => copyToClipboard(selectedArticle!.link, 'Link copied to clipboard!')}
-					>
-						<Copy class="size-4" />
-						Copy Link
-					</Button>
-					<Button
-						variant="outline"
-						size="sm"
-						href={selectedArticle.link}
-						target="_blank"
-						rel="noopener noreferrer"
-					>
-						<ExternalLink class="size-4" />
-						Open
-					</Button>
-				</div>
+				<div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+					<Badge variant="secondary">{selectedArticle.source}</Badge>
+					<span class="text-xs text-muted-foreground">{formatPublishedDate(selectedArticle.published_datetime, timezone)}</span>
+					<div class="flex items-center gap-2 sm:ml-auto">
+						<Button
+							variant="outline"
+							size="icon-sm"
+							onclick={() => copyToClipboard(selectedArticle!.link, 'Link copied to clipboard!')}
+							aria-label="Copy link"
+							title="Copy link"
+						>
+							<Copy class="size-4" />
+						</Button>
+						<Button
+							variant="outline"
+							size="icon-sm"
+							href={selectedArticle.link}
+							target="_blank"
+							rel="noopener noreferrer"
+							aria-label="Open in new tab"
+							title="Open in new tab"
+						>
+							<ExternalLink class="size-4" />
+						</Button>
+					</div>
 			</div>
 			{#if isLoadingContent}
 				<div class="flex items-center justify-center py-8">
@@ -1496,7 +1545,7 @@ onDestroy(() => {
 					</div>
 				</div>
 				
-				<div class="flex justify-end gap-2 pt-2">
+				<div class="flex flex-col gap-2 pt-2 sm:flex-row sm:justify-end">
 					<Button
 						variant="outline"
 						size="sm"
@@ -1505,6 +1554,7 @@ onDestroy(() => {
 								openArticleModal(summaryArticle);
 							}
 						}}
+						class="w-full sm:w-auto"
 					>
 						<FileText class="h-4 w-4 mr-2" />
 						Read Full Article
@@ -1515,6 +1565,7 @@ onDestroy(() => {
 						href={summaryArticle.link}
 						target="_blank"
 						rel="noopener noreferrer"
+						class="w-full sm:w-auto"
 					>
 						<ExternalLink class="h-4 w-4 mr-2" />
 						Open Original

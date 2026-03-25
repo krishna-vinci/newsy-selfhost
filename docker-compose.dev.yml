@@ -15,6 +15,9 @@ services:
       - caddy-net
     depends_on:
       - newsy-backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
     develop:
       watch:
         - action: sync
@@ -22,6 +25,8 @@ services:
           target: /app
           ignore:
             - node_modules/
+        - action: rebuild
+          path: ./frontend/package.json
 
   newsy-backend:
     build:
@@ -32,6 +37,7 @@ services:
     env_file:
       - .env
     volumes:
+      - .:/app
       - backup_data:/app/data/backups
       - reports_data:/app/reports
     command: ["fastapi", "dev", "main.py", "--host", "0.0.0.0", "--port", "8765"]
@@ -43,6 +49,8 @@ services:
           ignore:
             - __pycache__/
             - .venv/
+        - action: rebuild
+          path: requirements.txt
     restart: unless-stopped
     networks:
       - db-net
@@ -55,6 +63,7 @@ services:
     build:
       context: ./scheduler
       dockerfile: Dockerfile
+      target: development
     ports:
       - "8667:8667"
     environment:
@@ -72,6 +81,15 @@ services:
       - CLEANUP_FREQUENCY=24h
       - SERVER_PORT=8667
       - LOG_LEVEL=info
+    volumes:
+      - ./scheduler:/app
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./scheduler
+          target: /app
+        - action: rebuild
+          path: ./scheduler/go.mod
     restart: unless-stopped
     networks:
       - db-net

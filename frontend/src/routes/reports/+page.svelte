@@ -2,7 +2,6 @@
 import type { PageData } from './$types.js';
 import { invalidateAll } from '$app/navigation';
 import { Calendar, FileText, Download, Trash2, Plus, Clock } from '@lucide/svelte';
-import SocialIcons from '@rodneylab/svelte-social-icons';
 import { toast } from 'svelte-sonner';
 import Button from '$lib/components/ui/button/index.svelte';
 import Badge from '$lib/components/ui/badge/index.svelte';
@@ -32,8 +31,11 @@ type Schedule = {
 
 type ReportFile = {
 	filename: string;
-	size: number;
-	modified: string;
+	file_size: number;
+	generated_at: string;
+	category: string;
+	report_type: string;
+	path: string;
 };
 
 type Category = {
@@ -78,6 +80,10 @@ async function toggleSchedule(schedule: Schedule) {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
+				category: schedule.category,
+				schedule_type: schedule.schedule_type,
+				schedule_hour: schedule.schedule_hour,
+				schedule_minute: schedule.schedule_minute,
 				enabled: schedule.enabled
 			})
 		});
@@ -360,9 +366,9 @@ $effect(() => {
 										<Table.Cell class="text-sm text-muted-foreground">
 											{parsed.timestamp}
 										</Table.Cell>
-										<Table.Cell class="text-sm text-muted-foreground">
-											{formatFileSize(file.size)}
-										</Table.Cell>
+									<Table.Cell class="text-sm text-muted-foreground">
+										{formatFileSize(file.file_size)}
+									</Table.Cell>
 										<Table.Cell class="text-right">
 											<Button
 												variant="ghost"
@@ -452,6 +458,7 @@ $effect(() => {
 				/>
 			</div>
 		</div>
+	</div>
 
 	<Dialog.Footer>
 		<Button variant="outline" onclick={() => createDialogOpen = false}>

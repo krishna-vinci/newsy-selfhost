@@ -47,25 +47,22 @@ async def process_feed(request: ProcessFeedRequest):
     This endpoint wraps the existing feed processing logic.
     """
     logger.info(f"Processing feed: {request.name} (ID: {request.feed_id})")
-    
+
     try:
         # Call the existing async feed processing function
         new_etag, new_last_modified, articles_added = await parse_and_store_rss_feed(
             feed_id=request.feed_id,
-            rss_url=request.url,
-            category=request.category,
-            source_name=request.name,
             etag=request.etag,
             last_modified=request.last_modified,
-            fetch_full_content=request.fetch_full_content
+            fetch_full_content=request.fetch_full_content,
         )
-        
+
         # Update feed metadata in database
         conn = await database.get_db_connection()
         try:
             # Calculate next check time
             next_check = datetime.now(IST) + timedelta(minutes=request.polling_interval)
-            
+
             # Update feed with new caching headers, next check time, and reset error count
             await conn.execute(
                 """
@@ -78,36 +75,40 @@ async def process_feed(request: ProcessFeedRequest):
                     parsing_error_msg = ''
                 WHERE id = $4
                 """,
-                new_etag, new_last_modified, next_check, request.feed_id
+                new_etag,
+                new_last_modified,
+                next_check,
+                request.feed_id,
             )
-            
-            logger.info(f"Updated feed {request.feed_id} metadata: next_check_at={next_check}, articles_added={articles_added}")
-            
-            # Invalidate feed caches so frontend sees new articles immediately
-            if articles_added > 0:
-                cache.invalidate_feeds_cache()
-                logger.debug(f"Invalidated feed cache after adding {articles_added} articles")
-            
+
+            logger.info(
+                f"Updated feed {request.feed_id} metadata: next_check_at={next_check}, articles_added={articles_added}"
+            )
+
         finally:
             await database.release_db_connection(conn)
-        
+
         return ProcessFeedResponse(
             success=True,
             articles_added=articles_added,
             new_etag=new_etag,
-            new_last_modified=new_last_modified
+            new_last_modified=new_last_modified,
         )
-        
+
     except Exception as e:
-        logger.exception(f"Error processing feed {request.name} (ID: {request.feed_id}): {e}")
-        
+        logger.exception(
+            f"Error processing feed {request.name} (ID: {request.feed_id}): {e}"
+        )
+
         # Update error count and message in database
         try:
             conn = await database.get_db_connection()
             try:
                 # Calculate next check time (with backoff on error)
-                next_check = datetime.now(IST) + timedelta(minutes=request.polling_interval * 2)
-                
+                next_check = datetime.now(IST) + timedelta(
+                    minutes=request.polling_interval * 2
+                )
+
                 await conn.execute(
                     """
                     UPDATE feeds 
@@ -117,18 +118,18 @@ async def process_feed(request: ProcessFeedRequest):
                         checked_at = NOW()
                     WHERE id = $3
                     """,
-                    str(e)[:500], next_check, request.feed_id
+                    str(e)[:500],
+                    next_check,
+                    request.feed_id,
                 )
             finally:
                 await database.release_db_connection(conn)
         except Exception as db_err:
-            logger.error(f"Failed to update error count for feed {request.feed_id}: {db_err}")
-        
-        return ProcessFeedResponse(
-            success=False,
-            articles_added=0,
-            error=str(e)
-        )
+            logger.error(
+                f"Failed to update error count for feed {request.feed_id}: {db_err}"
+            )
+
+        return ProcessFeedResponse(success=False, articles_added=0, error=str(e))
 
 
 @router.get("/internal/health")
