@@ -12,7 +12,6 @@ services:
     restart: unless-stopped
     networks:
       - db-net
-      - caddy-net
     depends_on:
       - newsy-backend
     volumes:
@@ -54,7 +53,6 @@ services:
     restart: unless-stopped
     networks:
       - db-net
-      - caddy-net
     depends_on:
       - newsy_db
       - newsy-redis
@@ -132,6 +130,3 @@ volumes:
 
 networks:
   db-net:
-    external: true
-  caddy-net:
-    external: true

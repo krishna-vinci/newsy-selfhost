@@ -1,7 +1,8 @@
 <script lang="ts">
-import type { PageData } from './$types.js';
-import { invalidateAll } from '$app/navigation';
-import { onMount, onDestroy } from 'svelte';
+	import type { PageData } from './$types.js';
+	import { invalidateAll } from '$app/navigation';
+	import { page } from '$app/stores';
+	import { onMount, onDestroy } from 'svelte';
 import { Copy, Eye, CheckCircle, Circle, LayoutGrid, List, Columns2, ExternalLink, Search, X, Star, FileText, Sparkles, ChevronUp, ChevronDown, HelpCircle, Bell } from '@lucide/svelte';
 import { toast } from 'svelte-sonner';
 import { copyToClipboard } from '$lib/utils/clipboard.ts';
@@ -114,6 +115,25 @@ let newArticlesByCategory = $state<Record<string, number>>({});
 let updateCheckInterval: ReturnType<typeof setInterval> | null = null;
 let unsubscribe: () => void;
 
+function applyCategoryFromUrl() {
+	const categoryParam = $page.url.searchParams.get('category');
+	if (!categoryParam) {
+		return;
+	}
+
+	const normalizedCategory = decodeURIComponent(categoryParam);
+	const availableCategories = data.categories.map((category) => category.category);
+	if (normalizedCategory === selectedCategory) {
+		return;
+	}
+
+	if (normalizedCategory === 'all' || availableCategories.includes(normalizedCategory)) {
+		selectedCategory = normalizedCategory;
+		selectedFeedUrl = null;
+		selectedFeedName = null;
+	}
+}
+
 function hasThumbnail(article: FeedItem): boolean {
 	return Boolean(article.thumbnail) && !failedThumbnails.has(article.link);
 }
@@ -156,6 +176,10 @@ const baseFilteredArticles = $derived.by(() => {
 			: displayCategories.find(cat => cat.category === selectedCategory)?.feed_items || []);
 	
 	return mergeWithReadStatus(articles);
+});
+
+$effect(() => {
+	applyCategoryFromUrl();
 });
 
 // Filter out read articles if hideReadArticles is enabled
@@ -861,6 +885,7 @@ async function refreshToShowNewArticles() {
 
 // Start polling for updates every 30 seconds
 onMount(async () => {
+	applyCategoryFromUrl();
 	// Load settings and set default view mode
 	await settings.load();
 	unsubscribe = settings.subscribe((s) => {

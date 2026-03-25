@@ -75,14 +75,14 @@ async def init_db():
     conn = await get_db_connection()
 
     try:
-        # Categories table - includes ntfy_enabled, telegram_enabled, ai_prompt, ai_enabled
+        # Categories table - includes browser push + telegram toggles, ai_prompt, ai_enabled
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS categories (
                 id SERIAL PRIMARY KEY,
                 name TEXT UNIQUE NOT NULL,
                 priority INTEGER DEFAULT 0,
                 is_default BOOLEAN DEFAULT false,
-                ntfy_enabled BOOLEAN DEFAULT true,
+                web_push_enabled BOOLEAN DEFAULT true,
                 telegram_enabled BOOLEAN DEFAULT false,
                 telegram_chat_id TEXT DEFAULT NULL,
                 ai_prompt TEXT DEFAULT NULL,
@@ -227,6 +227,43 @@ async def init_db():
         """)
         logger.info("User preferences table initialized")
 
+        # User-owned notification/integration configuration
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_integrations (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                config JSONB NOT NULL DEFAULT '{}'::jsonb,
+                is_enabled BOOLEAN NOT NULL DEFAULT true,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (user_id, provider)
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_push_subscriptions (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                endpoint TEXT NOT NULL UNIQUE,
+                p256dh_key TEXT NOT NULL,
+                auth_key TEXT NOT NULL,
+                user_agent TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_user_push_subscriptions_user_id
+            ON user_push_subscriptions (user_id, updated_at DESC)
+            """
+        )
+        logger.info("User integrations and push subscriptions tables initialized")
+
         # User article status (read/unread tracking)
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_article_status (
@@ -358,8 +395,12 @@ async def init_db():
         except Exception as e:
             logger.debug(f"auto_starred_by column might already exist: {e}")
 
-        # Add telegram_enabled and telegram_chat_id columns to categories if they don't exist
+        # Add browser/web push + telegram columns to categories if they don't exist
         try:
+            await conn.execute("""
+                ALTER TABLE categories
+                ADD COLUMN IF NOT EXISTS web_push_enabled BOOLEAN DEFAULT true;
+            """)
             await conn.execute("""
                 ALTER TABLE categories 
                 ADD COLUMN IF NOT EXISTS telegram_enabled BOOLEAN DEFAULT false;
@@ -368,11 +409,17 @@ async def init_db():
                 ALTER TABLE categories 
                 ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT DEFAULT NULL;
             """)
-            logger.info(
-                "Added telegram_enabled and telegram_chat_id columns to categories table"
-            )
+            logger.info("Added notification columns to categories table")
         except Exception as e:
             logger.debug(f"Telegram columns might already exist: {e}")
+
+        # Backfill browser push toggle from legacy ntfy preference if still present.
+        try:
+            await conn.execute(
+                "UPDATE categories SET web_push_enabled = COALESCE(ntfy_enabled, web_push_enabled, true)"
+            )
+        except Exception as e:
+            logger.debug(f"Legacy ntfy backfill skipped: {e}")
 
         # Add polling_interval column to feeds if it doesn't exist
         try:
@@ -471,6 +518,32 @@ async def init_db():
             """
             CREATE INDEX IF NOT EXISTS idx_user_notifications_user_id
             ON user_notifications (user_id, sent_at DESC)
+            """
+        )
+
+        # Backfill any legacy per-category telegram chat IDs into a per-user integration record.
+        await conn.execute(
+            """
+            INSERT INTO user_integrations (user_id, provider, config, is_enabled, created_at, updated_at)
+            SELECT DISTINCT ON (user_id)
+                user_id,
+                'telegram',
+                jsonb_build_object('chat_id', telegram_chat_id),
+                true,
+                NOW(),
+                NOW()
+            FROM categories
+            WHERE user_id IS NOT NULL
+              AND telegram_chat_id IS NOT NULL
+              AND BTRIM(telegram_chat_id) <> ''
+            ON CONFLICT (user_id, provider)
+            DO UPDATE
+            SET config = CASE
+                    WHEN COALESCE(user_integrations.config->>'chat_id', '') = ''
+                    THEN EXCLUDED.config
+                    ELSE user_integrations.config
+                END,
+                updated_at = NOW()
             """
         )
 

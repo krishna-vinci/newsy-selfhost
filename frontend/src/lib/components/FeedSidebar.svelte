@@ -3,7 +3,6 @@ import { onMount } from 'svelte';
 import { goto, invalidateAll } from '$app/navigation';
 import { page } from '$app/stores';
 import { toast } from 'svelte-sonner';
-import { copyToClipboard } from '$lib/utils/clipboard.ts';
 import * as Sidebar from '$lib/components/ui/sidebar/index.js';
 import Button from '$lib/components/ui/button/index.svelte';
 import Input from '$lib/components/ui/input/index.svelte';
@@ -12,7 +11,7 @@ import * as Select from '$lib/components/ui/select/index.js';
 import * as Switch from '$lib/components/ui/switch/index.ts';
 import * as Tabs from '$lib/components/ui/tabs/index.js';
 import * as Dialog from '$lib/components/ui/dialog/index.ts';
-import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Copy, Database, Download, Upload, FileDown, FileUp, Trash, CheckCircle, Star, Check, LogOut } from '@lucide/svelte';
+import { ChevronDown, Plus, Loader2, Pencil, Trash2, Settings, GripVertical, FileText, Bell, Database, Download, Upload, FileDown, FileUp, Trash, CheckCircle, Star, Check, LogOut } from '@lucide/svelte';
 import { dndzone } from 'svelte-dnd-action';
 import { settings } from '$lib/stores/settings.ts';
 
@@ -34,13 +33,27 @@ type Category = {
 	name: string;
 	priority: number;
 	is_default: boolean;
-	ntfy_enabled: boolean;
+	web_push_enabled: boolean;
 	telegram_enabled: boolean;
-	telegram_chat_id: string | null;
 	ai_prompt: string | null;
 	ai_enabled: boolean;
 	unread_count?: number;
 	total_count?: number;
+};
+
+type NotificationPreferences = {
+	telegram: {
+		available: boolean;
+		enabled: boolean;
+		configured: boolean;
+		chat_id: string | null;
+	};
+	web_push: {
+		available: boolean;
+		configured: boolean;
+		subscription_count: number;
+		public_key: string | null;
+	};
 };
 
 type FeedConfig = Record<string, Feed[]>;
@@ -86,6 +99,27 @@ let selectedTimezone = $state('Asia/Kolkata');
 
 // Preferences state
 let selectedDefaultView = $state<'card' | 'headline' | 'column'>('card');
+
+// Notification preferences state
+let notificationPreferences = $state<NotificationPreferences>({
+	telegram: {
+		available: false,
+		enabled: false,
+		configured: false,
+		chat_id: null
+	},
+	web_push: {
+		available: false,
+		configured: false,
+		subscription_count: 0,
+		public_key: null
+	}
+});
+let telegramChatId = $state('');
+let isSavingTelegramPreferences = $state(false);
+let isSendingTelegramTest = $state(false);
+let isUpdatingBrowserPush = $state(false);
+let browserPushSupportMessage = $state<string | null>(null);
 
 // Backup & Export state
 let backups = $state<any[]>([]);
@@ -384,6 +418,7 @@ async function markAllFeedAsRead(feedUrl: string, feedName: string, event: Event
 // Category Settings Functions
 function openCategorySettings() {
 	loadCategories();
+	loadNotificationPreferences();
 	if ($page.data.auth?.isAdmin) {
 		loadBackups(); // Load backups when opening settings
 	}
@@ -477,50 +512,284 @@ async function deleteCategory(categoryId: number) {
 	}
 }
 
-async function toggleCategoryNtfy(category: Category) {
-	const previousEnabled = category.ntfy_enabled;
-	category.ntfy_enabled = !category.ntfy_enabled;
-	
+async function loadNotificationPreferences() {
 	try {
-		const response = await fetch(`/api/category/${category.id}/ntfy`, {
-			method: 'PUT',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				ntfy_enabled: category.ntfy_enabled
-			})
-		});
-		
-		if (!response.ok) throw new Error('Failed to update ntfy setting');
-		toast.success(category.ntfy_enabled ? 'Ntfy notifications enabled' : 'Ntfy notifications disabled');
+		const response = await fetch('/api/notifications/preferences');
+		if (!response.ok) {
+			throw new Error('Failed to load notification preferences');
+		}
+
+		const payload = await response.json();
+		notificationPreferences = payload;
+		telegramChatId = payload.telegram.chat_id || '';
 	} catch (error) {
-		category.ntfy_enabled = previousEnabled;
-		toast.error('Failed to update ntfy setting');
+		console.error('Error loading notification preferences:', error);
 	}
 }
 
-async function updateCategoryTelegram(category: Category, enabled: boolean, chatId: string | null) {
+async function updateCategoryTelegram(category: Category, enabled: boolean) {
+	if (enabled && !notificationPreferences.telegram.configured) {
+		activeTab = 'notifications';
+		toast.error('Set up Telegram in Notifications before enabling category alerts');
+		return;
+	}
+
 	const previousEnabled = category.telegram_enabled;
-	const previousChatId = category.telegram_chat_id;
-	
 	category.telegram_enabled = enabled;
-	category.telegram_chat_id = chatId;
-	
+
 	try {
 		const response = await fetch(`/api/category/${category.id}/telegram`, {
 			method: 'PUT',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				telegram_enabled: enabled,
-				telegram_chat_id: chatId
+				telegram_enabled: enabled
 			})
 		});
-		
+
 		if (!response.ok) throw new Error('Failed to update telegram settings');
 		toast.success(enabled ? 'Telegram notifications enabled' : 'Telegram notifications disabled');
 	} catch (error) {
 		category.telegram_enabled = previousEnabled;
-		category.telegram_chat_id = previousChatId;
 		toast.error('Failed to update telegram settings');
+	}
+}
+
+async function updateCategoryWebPush(category: Category, enabled: boolean) {
+	const previousEnabled = category.web_push_enabled;
+	category.web_push_enabled = enabled;
+
+	try {
+		const response = await fetch(`/api/category/${category.id}/web-push`, {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				web_push_enabled: enabled
+			})
+		});
+
+		if (!response.ok) throw new Error('Failed to update browser push settings');
+		toast.success(enabled ? 'Browser push enabled for category' : 'Browser push disabled for category');
+	} catch (error) {
+		category.web_push_enabled = previousEnabled;
+		toast.error('Failed to update browser push settings');
+	}
+}
+
+async function saveTelegramPreferences() {
+	if (!notificationPreferences.telegram.available) {
+		toast.error('Telegram bot is not configured on this server');
+		return;
+	}
+
+	if (notificationPreferences.telegram.enabled && !telegramChatId.trim()) {
+		toast.error('Enter your Telegram chat ID first');
+		return;
+	}
+
+	isSavingTelegramPreferences = true;
+	try {
+		const response = await fetch('/api/notifications/preferences/telegram', {
+			method: 'PUT',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({
+				chat_id: telegramChatId.trim(),
+				enabled: notificationPreferences.telegram.enabled
+			})
+		});
+
+		if (!response.ok) {
+			const error = await response.json().catch(() => null);
+			throw new Error(error?.detail || 'Failed to save Telegram settings');
+		}
+
+		await loadNotificationPreferences();
+		toast.success('Telegram settings saved');
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : 'Failed to save Telegram settings');
+	} finally {
+		isSavingTelegramPreferences = false;
+	}
+}
+
+async function sendTelegramTest() {
+	if (!notificationPreferences.telegram.configured) {
+		toast.error('Save your Telegram chat ID first');
+		return;
+	}
+
+	isSendingTelegramTest = true;
+	try {
+		const response = await fetch('/api/notifications/preferences/telegram/test', {
+			method: 'POST'
+		});
+		if (!response.ok) {
+			const error = await response.json().catch(() => null);
+			throw new Error(error?.detail || 'Failed to send Telegram test');
+		}
+		toast.success('Telegram test sent');
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : 'Failed to send Telegram test');
+	} finally {
+		isSendingTelegramTest = false;
+	}
+}
+
+function getBrowserPushSupportMessage(): string | null {
+	if (typeof window === 'undefined') {
+		return null;
+	}
+
+	if (!window.isSecureContext) {
+		return 'Browser push requires HTTPS or localhost. Plain HTTP on local-network addresses like 192.168.x.x is blocked by browsers.';
+	}
+
+	if (!('Notification' in window)) {
+		return 'This browser does not support the Notifications API required for push alerts.';
+	}
+
+	if (!('serviceWorker' in navigator)) {
+		return 'This browser does not support service workers required for push alerts.';
+	}
+
+	if (!('PushManager' in window)) {
+		return 'This browser does not support the Push API required for web push alerts.';
+	}
+
+	return null;
+}
+
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+	const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+	const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+	const rawData = window.atob(base64);
+	const outputArray = new Uint8Array(rawData.length);
+
+	for (let i = 0; i < rawData.length; i += 1) {
+		outputArray[i] = rawData.charCodeAt(i);
+	}
+
+	return outputArray;
+}
+
+async function getPushSubscription() {
+	const supportMessage = getBrowserPushSupportMessage();
+	if (supportMessage) {
+		browserPushSupportMessage = supportMessage;
+		return null;
+	}
+
+	let registration = await navigator.serviceWorker.getRegistration();
+	if (!registration) {
+		registration = await navigator.serviceWorker.register('/service-worker.js');
+	}
+
+	await navigator.serviceWorker.ready;
+	return registration.pushManager.getSubscription();
+}
+
+async function enableBrowserPush() {
+	if (!notificationPreferences.web_push.available) {
+		toast.error('Browser push is not configured on this server');
+		return;
+	}
+
+	const supportMessage = getBrowserPushSupportMessage();
+	if (supportMessage) {
+		browserPushSupportMessage = supportMessage;
+		toast.error(supportMessage);
+		return;
+	}
+
+	isUpdatingBrowserPush = true;
+	try {
+		browserPushSupportMessage = null;
+		if (!notificationPreferences.web_push.public_key) {
+			throw new Error('Missing VAPID public key');
+		}
+
+		const permission = await Notification.requestPermission();
+		if (permission !== 'granted') {
+			throw new Error('Notification permission was not granted');
+		}
+
+		let registration = await navigator.serviceWorker.getRegistration();
+		if (!registration) {
+			registration = await navigator.serviceWorker.register('/service-worker.js');
+		}
+
+		const existingSubscription = await registration.pushManager.getSubscription();
+		const subscription =
+			existingSubscription ||
+			(await registration.pushManager.subscribe({
+				userVisibleOnly: true,
+				applicationServerKey: urlBase64ToUint8Array(notificationPreferences.web_push.public_key || '') as BufferSource
+			}));
+
+		const response = await fetch('/api/notifications/push/subscribe', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify(subscription)
+		});
+
+		if (!response.ok) {
+			const error = await response.json().catch(() => null);
+			throw new Error(error?.detail || 'Failed to save browser subscription');
+		}
+
+		await loadNotificationPreferences();
+		toast.success('Browser push enabled');
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : 'Failed to enable browser push');
+	} finally {
+		isUpdatingBrowserPush = false;
+	}
+}
+
+async function disableBrowserPush() {
+	const supportMessage = getBrowserPushSupportMessage();
+	if (supportMessage) {
+		browserPushSupportMessage = supportMessage;
+		toast.error(supportMessage);
+		return;
+	}
+
+	isUpdatingBrowserPush = true;
+	try {
+		const subscription = await getPushSubscription();
+		if (!subscription) {
+			await loadNotificationPreferences();
+			toast.success('Browser push already disabled');
+			return;
+		}
+
+		await fetch('/api/notifications/push/unsubscribe', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ endpoint: subscription.endpoint })
+		});
+		await subscription.unsubscribe();
+
+		await loadNotificationPreferences();
+		toast.success('Browser push disabled');
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : 'Failed to disable browser push');
+	} finally {
+		isUpdatingBrowserPush = false;
+	}
+}
+
+async function sendBrowserPushTest() {
+	try {
+		const response = await fetch('/api/notifications/push/test', {
+			method: 'POST'
+		});
+		if (!response.ok) {
+			const error = await response.json().catch(() => null);
+			throw new Error(error?.detail || 'Failed to send browser push test');
+		}
+		toast.success('Browser push test sent');
+	} catch (error) {
+		toast.error(error instanceof Error ? error.message : 'Failed to send browser push test');
 	}
 }
 
@@ -882,6 +1151,8 @@ function handleFeedClick(feedUrl: string, feedName: string) {
 onMount(() => {
 	loadFeedConfig();
 	loadCategories(); // Load categories to get counts
+	loadNotificationPreferences();
+	browserPushSupportMessage = getBrowserPushSupportMessage();
 	settings.load();
 	
 	// Subscribe to settings changes
@@ -1301,10 +1572,11 @@ $effect(() => {
     <div class="p-6">
       <h3 class="mb-4 text-lg font-semibold">Settings</h3>
       <Tabs.Root bind:value={activeTab} class="w-full">
-<Tabs.List class="grid w-full grid-cols-2 sm:grid-cols-4">
+<Tabs.List class="grid w-full grid-cols-2 sm:grid-cols-5">
     <Tabs.Trigger value="categories">Manage Categories</Tabs.Trigger>
     <Tabs.Trigger value="ai-filters">AI Filters</Tabs.Trigger>
     <Tabs.Trigger value="preferences">Preferences</Tabs.Trigger>
+    <Tabs.Trigger value="notifications">Notifications</Tabs.Trigger>
     <Tabs.Trigger value="backup">{$page.data.auth?.isAdmin ? 'Backup & Export' : 'Data Export'}</Tabs.Trigger>
 </Tabs.List>
         <Tabs.Content value="categories" class="mt-4 min-h-[300px] sm:min-h-[400px]">
@@ -1315,7 +1587,6 @@ $effect(() => {
             onfinalize={handleDndFinalize}
           >
             {#each categoriesList as category (category.id)}
-              {@const topicName = `feeds-${category.name.toLowerCase().replace(/\s+/g, '-')}`}
               <div class="mb-3 rounded-md bg-background p-4 border border-border">
                 <div class="flex items-center gap-3">
                   <GripVertical class="h-5 w-5 cursor-grab text-muted-foreground flex-shrink-0" />
@@ -1363,88 +1634,33 @@ $effect(() => {
                         </Button>
                       </div>
                     {/if}
-                    <div class="flex items-center gap-2">
-                      <span class="text-xs text-muted-foreground font-mono bg-muted px-2 py-0.5 rounded">{topicName}</span>
-                      <Button variant="ghost" size="icon" class="h-5 w-5" onclick={() => copyToClipboard(topicName, 'Topic copied to clipboard')}>
-                        <Copy class="h-3 w-3" />
-                      </Button>
-                    </div>
+                    <p class="text-xs text-muted-foreground">
+                      Telegram alerts can be enabled per category after you connect Telegram in the Notifications tab.
+                    </p>
                   </div>
                   <div class="flex items-center gap-3 flex-shrink-0 flex-wrap">
-                    <div class="flex items-center gap-2">
-                      <Bell class="h-4 w-4 text-muted-foreground" />
-                      <Switch.Switch checked={category.ntfy_enabled} onCheckedChange={() => toggleCategoryNtfy(category)} />
-                      <span class="text-xs text-muted-foreground min-w-[24px]">{category.ntfy_enabled ? 'On' : 'Off'}</span>
-                    </div>
-									<div class="flex items-center gap-2">
-									<span class="text-xs font-semibold text-muted-foreground">TG</span>
-										<Dialog.Root>
-											<Dialog.Trigger>
-												<Switch.Switch 
-                            checked={category.telegram_enabled}
-                            onCheckedChange={() => {
-                              if (category.telegram_enabled) {
-                                updateCategoryTelegram(category, false, category.telegram_chat_id);
-                              } else if (category.telegram_chat_id) {
-                                updateCategoryTelegram(category, true, category.telegram_chat_id);
-                              }
-                            }}
-                          />
-                        </Dialog.Trigger>
-                        <Dialog.Content class="sm:max-w-md">
-                          <Dialog.Header>
-                            <Dialog.Title>Telegram Notifications - {category.name}</Dialog.Title>
-                            <Dialog.Description>
-                              Configure Telegram notifications for this category.
-                            </Dialog.Description>
-                          </Dialog.Header>
-                          <div class="space-y-4">
-                            <div class="flex items-center gap-2">
-                              <Switch.Switch 
-                                checked={category.telegram_enabled} 
-                                onCheckedChange={(checked) => {
-                                  updateCategoryTelegram(category, checked, category.telegram_chat_id);
-                                }} 
-                              />
-                              <span class="text-sm font-medium">Enable Telegram Notifications</span>
-                            </div>
-                            <div>
-                              <label for="telegram-chat-id" class="text-sm font-medium">Chat ID</label>
-                              <Input 
-                                id="telegram-chat-id" 
-                                type="text" 
-                                placeholder="Enter your Telegram Chat ID" 
-                                value={category.telegram_chat_id || ''}
-                                oninput={(e) => {
-                                  const chatId = e.currentTarget.value.trim() || null;
-                                  category.telegram_chat_id = chatId;
-                                }}
-                                onblur={() => {
-                                  if (category.telegram_enabled && category.telegram_chat_id) {
-                                    updateCategoryTelegram(category, true, category.telegram_chat_id);
-                                  }
-                                }}
-                                class="mt-1"
-                              />
-                              <p class="text-xs text-muted-foreground mt-1">Get your Chat ID from @userinfobot on Telegram</p>
-                            </div>
-                            <Button 
-                              onclick={() => {
-                                if (category.telegram_chat_id) {
-                                  updateCategoryTelegram(category, true, category.telegram_chat_id);
-                                } else {
-                                  toast.error('Please enter a Chat ID');
-                                }
-                              }}
-                              class="w-full"
-                            >
-                              Save Settings
-                            </Button>
-                          </div>
-                        </Dialog.Content>
-                      </Dialog.Root>
-                      <span class="text-xs text-muted-foreground min-w-[24px]">{category.telegram_enabled ? 'On' : 'Off'}</span>
-                    </div>
+	                    <div class="flex items-center gap-2 rounded-md border px-3 py-2">
+	                      <Bell class="h-4 w-4 text-muted-foreground" />
+	                      <span class="text-xs font-semibold text-muted-foreground">Push</span>
+	                      <Switch.Switch
+	                        checked={category.web_push_enabled}
+	                        onCheckedChange={(checked) => {
+	                          updateCategoryWebPush(category, checked);
+	                        }}
+	                      />
+	                      <span class="text-xs text-muted-foreground min-w-[24px]">{category.web_push_enabled ? 'On' : 'Off'}</span>
+	                    </div>
+	                    <div class="flex items-center gap-2 rounded-md border px-3 py-2">
+	                      <Bell class="h-4 w-4 text-muted-foreground" />
+	                      <span class="text-xs font-semibold text-muted-foreground">Telegram</span>
+	                      <Switch.Switch
+	                        checked={category.telegram_enabled}
+	                        onCheckedChange={(checked) => {
+	                          updateCategoryTelegram(category, checked);
+	                        }}
+	                      />
+	                      <span class="text-xs text-muted-foreground min-w-[24px]">{category.telegram_enabled ? 'On' : 'Off'}</span>
+	                    </div>
                     <Button variant={category.is_default ? 'secondary' : 'ghost'} size="sm" class="text-xs whitespace-nowrap" onclick={() => setDefaultCategory(category.id)}>
                       {category.is_default ? 'Default' : 'Set Default'}
                     </Button>
@@ -1603,6 +1819,116 @@ $effect(() => {
         </div>
     </div>
 </Tabs.Content>
+        <Tabs.Content value="notifications" class="mt-4 min-h-[400px]">
+          <div class="space-y-6 p-4">
+            <div class="rounded-lg border bg-background p-4">
+              <div class="mb-4">
+                <h4 class="text-sm font-semibold">In-app inbox</h4>
+                <p class="mt-1 text-xs text-muted-foreground">
+                  All users now have an internal notification inbox. Use the bell in the header to review new article alerts.
+                </p>
+              </div>
+              <div class="rounded-md bg-muted p-3 text-xs text-muted-foreground">
+	                In-app notifications are always available and do not require any third-party service.
+              </div>
+	          <p class="mt-3 text-xs text-muted-foreground">
+	            Browser push and Telegram both respect the category toggles in <strong>Manage Categories</strong>.
+	          </p>
+            </div>
+
+            <div class="rounded-lg border bg-background p-4">
+              <div class="mb-4 flex items-start justify-between gap-4">
+                <div>
+                  <h4 class="text-sm font-semibold">Telegram</h4>
+                  <p class="mt-1 text-xs text-muted-foreground">
+                    Connect one Telegram chat for your account, then enable Telegram on the categories you want.
+                  </p>
+                </div>
+                <Switch.Switch
+                  checked={notificationPreferences.telegram.enabled}
+                  disabled={!notificationPreferences.telegram.available}
+                  onCheckedChange={(checked) => {
+                    notificationPreferences.telegram.enabled = checked;
+                  }}
+                />
+              </div>
+
+              {#if notificationPreferences.telegram.available}
+                <div class="space-y-3">
+                  <div>
+                    <label for="global-telegram-chat-id" class="mb-1 block text-sm font-medium">Chat ID</label>
+                    <Input
+                      id="global-telegram-chat-id"
+                      type="text"
+                      bind:value={telegramChatId}
+                      placeholder="Enter your Telegram chat ID"
+                    />
+                    <p class="mt-1 text-xs text-muted-foreground">
+                      Start your bot first, then get your chat ID from @userinfobot or from your bot's /start conversation.
+                    </p>
+                  </div>
+                  <div class="flex flex-wrap gap-2">
+                    <Button onclick={saveTelegramPreferences} disabled={isSavingTelegramPreferences}>
+                      {#if isSavingTelegramPreferences}
+                        <Loader2 class="mr-2 h-4 w-4 animate-spin" />
+                      {/if}
+                      Save Telegram
+                    </Button>
+                    <Button variant="outline" onclick={sendTelegramTest} disabled={isSendingTelegramTest || !notificationPreferences.telegram.configured}>
+                      {#if isSendingTelegramTest}
+                        <Loader2 class="mr-2 h-4 w-4 animate-spin" />
+                      {/if}
+                      Send test
+                    </Button>
+                  </div>
+                </div>
+              {:else}
+                <p class="text-xs text-muted-foreground">Telegram is unavailable until the server has a bot token configured.</p>
+              {/if}
+            </div>
+
+            <div class="rounded-lg border bg-background p-4">
+              <div class="mb-4">
+                <h4 class="text-sm font-semibold">Browser push</h4>
+                <p class="mt-1 text-xs text-muted-foreground">
+	                  Enable browser push to get mobile-style alerts directly from your installed web app.
+                </p>
+              </div>
+              {#if notificationPreferences.web_push.available}
+                <div class="space-y-3">
+					{#if browserPushSupportMessage}
+						<div class="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-muted-foreground">
+							{browserPushSupportMessage}
+						</div>
+					{/if}
+                  <p class="text-xs text-muted-foreground">
+                    {#if notificationPreferences.web_push.configured}
+                      {notificationPreferences.web_push.subscription_count} browser subscription{notificationPreferences.web_push.subscription_count === 1 ? '' : 's'} active for this account.
+                    {:else}
+                      No browser subscription is active yet for this account.
+                    {/if}
+                  </p>
+                  <div class="flex flex-wrap gap-2">
+	                    <Button onclick={enableBrowserPush} disabled={isUpdatingBrowserPush || !!browserPushSupportMessage}>
+                      {#if isUpdatingBrowserPush}
+                        <Loader2 class="mr-2 h-4 w-4 animate-spin" />
+                      {/if}
+                      Enable on this device
+                    </Button>
+                    <Button variant="outline" onclick={disableBrowserPush} disabled={isUpdatingBrowserPush || !notificationPreferences.web_push.configured}>
+                      Disable on this device
+                    </Button>
+                    <Button variant="outline" onclick={sendBrowserPushTest} disabled={!notificationPreferences.web_push.configured}>
+                      Send test
+                    </Button>
+                  </div>
+                </div>
+              {:else}
+                <p class="text-xs text-muted-foreground">Browser push is unavailable until VAPID keys are configured on the server.</p>
+              {/if}
+            </div>
+          </div>
+        </Tabs.Content>
         <Tabs.Content value="backup" class="mt-4 min-h-[400px]">
           <div class="space-y-6 p-4">
             {#if $page.data.auth?.isAdmin}
@@ -1845,10 +2171,10 @@ $effect(() => {
 				<div class="flex items-center justify-between rounded-lg border p-4">
 					<div class="space-y-0.5">
 						<label class="text-sm font-medium cursor-pointer">
-							Send ntfy notification with full content
+							Send priority alert
 						</label>
 						<p class="text-xs text-muted-foreground">
-							Get notified with the complete article content when a match is found
+							Create a high-priority in-app alert and forward it to your connected channels when a match is found
 						</p>
 					</div>
 					<Switch.Switch

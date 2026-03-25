@@ -10,9 +10,9 @@ import asyncio
 from typing import List, Dict, Any, Optional
 import asyncpg
 
-from ai_filter import get_openai_client, filter_article
-from config import Config
+from ai_filter import filter_article
 import database
+import notifications
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +241,7 @@ async def process_article_filters(
         if notify_filters:
             # Send notification with full content
             await send_filter_notification(
+                article_id,
                 title,
                 link,
                 description,
@@ -257,6 +258,7 @@ async def process_article_filters(
 
 
 async def send_filter_notification(
+    article_id: int,
     title: str,
     link: str,
     description: str,
@@ -268,7 +270,7 @@ async def send_filter_notification(
     category_id: Optional[int],
 ) -> None:
     """
-    Send ntfy notification with full article content when filters match.
+    Send an internal/browser/Telegram priority notification when filters match.
 
     Args:
         title: Article title
@@ -280,72 +282,26 @@ async def send_filter_notification(
         matching_filters: List of matching filters
     """
     try:
-        import httpx
-        from main import sanitize_text
-
-        NTFY_BASE_URL = "https://ntfy.sh"
-
-        # Check if ntfy is enabled for this category
-        from database import get_db_connection
-
-        conn = await get_db_connection()
-        if category_id is not None:
-            ntfy_enabled = await conn.fetchval(
-                "SELECT ntfy_enabled FROM categories WHERE id = $1 AND user_id = $2",
-                category_id,
-                user_id,
-            )
-        else:
-            ntfy_enabled = await conn.fetchval(
-                "SELECT ntfy_enabled FROM categories WHERE user_id = $1 AND name = $2",
-                user_id,
-                category,
-            )
-        await database.release_db_connection(conn)
-
-        if ntfy_enabled is False:
-            logger.debug(f"Ntfy notifications disabled for category: {category}")
-            return
-
-        # Prepare notification content
         filter_names = ", ".join([f["name"] for f in matching_filters])
-        title_text = sanitize_text(f"🎯 {title}")
-        topic = f"feeds-{category.lower().replace(' ', '-')}"
-        ntfy_url = f"{NTFY_BASE_URL}/{topic}"
-
-        headers = {
-            "Title": title_text,
-            "Click": link,
-            "Priority": "high",  # High priority for filtered articles
-            "Tags": "star",
-        }
-
-        # Include full content in notification body
-        # Strip HTML tags for notification
         import re
 
         if content:
-            # Basic HTML tag removal
             clean_content = re.sub("<[^<]+?>", "", content)
-            clean_content = clean_content.strip()[:1000]  # Limit to 1000 chars
+            clean_content = clean_content.strip()[:1000]
         else:
             clean_content = description
 
-        payload = f"""🎯 Matched Filter: {filter_names}
-
-{clean_content}
-
-Source: {source}"""
-
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    ntfy_url, headers=headers, content=payload.encode("utf-8")
-                )
-                response.raise_for_status()
-                logger.info(f"Sent filter notification for article: {title[:50]}...")
-        except httpx.HTTPStatusError as e:
-            logger.exception(f"Failed to send filter notification: {e}")
+        await notifications.deliver_notification(
+            user_id,
+            category_id,
+            f"🎯 {title}",
+            f"Matched filters: {filter_names}\n\n{clean_content}\n\nSource: {source}",
+            link,
+            article_id=article_id,
+            kind="filter_match",
+            push_tag=f"filter-{article_id}",
+        )
+        logger.info(f"Sent filter notification for article: {title[:50]}...")
 
     except Exception as e:
         logger.error(f"Error sending filter notification: {e}")

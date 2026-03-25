@@ -3,12 +3,12 @@ Worker module for RSS feed processing with HTTP caching
 Processes feed jobs from Redis queue using RQ
 """
 
-import os
 import logging
 import time
 from datetime import datetime, timedelta
 from dateutil import parser as date_parser
 import pytz
+from urllib.parse import quote
 
 import feedparser
 import httpx
@@ -22,6 +22,7 @@ import database
 import ai_filter
 import keyword_filter
 import cache
+import notifications
 from youtube_embed import convert_links_to_embeds
 
 load_dotenv()
@@ -37,9 +38,6 @@ logger = logging.getLogger(__name__)
 
 # Default thumbnail
 DEFAULT_THUMBNAIL = "https://via.placeholder.com/400x300.png?text=No+Image"
-
-# Ntfy configuration
-NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "https://ntfy.sh")
 
 
 def sanitize_text(text):
@@ -165,166 +163,6 @@ async def extract_article_content_with_readability(url: str) -> str:
     except Exception as e:
         logger.warning(f"Error extracting content with readability for {url}: {e}")
         return None
-
-
-async def send_ntfy_notification(
-    title: str,
-    link: str,
-    description: str,
-    category: str,
-    source: str,
-    user_id: int,
-    category_id: int,
-):
-    """Send ntfy notification for new articles."""
-    # Check if ntfy is enabled for this category
-    try:
-        conn = await database.get_db_connection()
-        ntfy_enabled = await conn.fetchval(
-            "SELECT ntfy_enabled FROM categories WHERE user_id = $1 AND id = $2",
-            user_id,
-            category_id,
-        )
-        await database.release_db_connection(conn)
-
-        if ntfy_enabled is False:
-            logger.debug(f"Ntfy notifications disabled for category: {category}")
-            return
-    except Exception as e:
-        logger.warning(f"Could not check ntfy status for category {category}: {e}")
-        return
-
-    title = sanitize_text(title)
-    topic = f"feeds-{category.lower().replace(' ', '-')}"
-    ntfy_url = f"{NTFY_BASE_URL}/{topic}"
-
-    headers = {
-        "Title": title,
-        "Click": link,
-    }
-
-    payload = f"{description[:160]}... (via {source})"
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                ntfy_url, headers=headers, content=payload.encode("utf-8")
-            )
-            response.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Failed to send ntfy notification: {e}")
-    except Exception as e:
-        logger.error(f"Failed to send ntfy notification: {e}")
-
-
-async def send_telegram_notification(
-    title: str,
-    link: str,
-    description: str,
-    category: str,
-    source: str,
-    thumbnail: str = None,
-    user_id: int | None = None,
-    category_id: int | None = None,
-):
-    """Send notification to Telegram for new articles."""
-    # Check if telegram is enabled for this category and get chat_id
-    try:
-        conn = await database.get_db_connection()
-        row = await conn.fetchrow(
-            "SELECT telegram_enabled, telegram_chat_id FROM categories WHERE id = $1 AND user_id = $2",
-            category_id,
-            user_id,
-        )
-        await database.release_db_connection(conn)
-
-        if not row or row["telegram_enabled"] is False:
-            logger.debug(f"Telegram notifications disabled for category: {category}")
-            return
-
-        chat_id = row["telegram_chat_id"]
-        if not chat_id:
-            logger.debug(f"No Telegram chat ID configured for category: {category}")
-            return
-
-    except Exception as e:
-        logger.warning(f"Could not check telegram status for category {category}: {e}")
-        return
-
-    # Get bot token from config
-    bot_token = Config.TELEGRAM_BOT_TOKEN
-
-    if not bot_token:
-        logger.warning("TELEGRAM_BOT_TOKEN not configured")
-        return
-
-    # Format the message with Markdown
-    title = sanitize_text(title)
-    description = sanitize_text(description)
-
-    # Escape special characters for Telegram MarkdownV2
-    def escape_markdown(text):
-        """Escape special characters for Telegram MarkdownV2."""
-        special_chars = [
-            "_",
-            "*",
-            "[",
-            "]",
-            "(",
-            ")",
-            "~",
-            "`",
-            ">",
-            "#",
-            "+",
-            "-",
-            "=",
-            "|",
-            "{",
-            "}",
-            ".",
-            "!",
-        ]
-        for char in special_chars:
-            text = text.replace(char, f"\\{char}")
-        return text
-
-    escaped_title = escape_markdown(title)
-    escaped_description = escape_markdown(description[:300])  # Limit description length
-    escaped_source = escape_markdown(source)
-    escaped_link = link  # URLs don't need escaping in markdown links
-
-    message = f"*{escaped_title}*\n\n{escaped_description}\n\n_via {escaped_source}_\n\n[Read Full Article]({escaped_link})"
-
-    # Send the notification
-    telegram_api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "MarkdownV2",
-        "disable_web_page_preview": False,
-    }
-
-    # If thumbnail is available, send as photo with caption instead
-    if thumbnail:
-        telegram_api_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-        payload = {
-            "chat_id": chat_id,
-            "photo": thumbnail,
-            "caption": message,
-            "parse_mode": "MarkdownV2",
-        }
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(telegram_api_url, json=payload)
-            response.raise_for_status()
-            logger.debug(f"Telegram notification sent for article: {title}")
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Failed to send Telegram notification: {e.response.text}")
-    except Exception as e:
-        logger.error(f"Failed to send Telegram notification: {e}")
 
 
 async def get_feed_last_update(feed_url: str):
@@ -588,26 +426,16 @@ async def parse_and_store_rss_feed(
                     # Send single consolidated notification
                     batch_title = f"{source_name}: {len(new_articles)} new article{'s' if len(new_articles) > 1 else ''}"
                     batch_description = f"Latest: {new_articles[0]['title']}"
-                    batch_link = new_articles[0]["link"]
+                    batch_link = f"/feeds?category={quote(category)}"
 
-                    await send_ntfy_notification(
-                        batch_title,
-                        batch_link,
-                        batch_description,
-                        category,
-                        source_name,
+                    await notifications.deliver_notification(
                         user_id,
                         category_id,
-                    )
-                    await send_telegram_notification(
                         batch_title,
-                        batch_link,
                         batch_description,
-                        category,
-                        source_name,
-                        new_articles[0]["thumbnail"],
-                        user_id,
-                        category_id,
+                        batch_link,
+                        kind="article_batch",
+                        push_tag=f"batch-{feed_id}",
                     )
                     logger.info(
                         f"Sent batched notification for {len(new_articles)} articles from {source_name}"

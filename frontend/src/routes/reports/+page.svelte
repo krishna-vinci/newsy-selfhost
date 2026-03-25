@@ -43,9 +43,8 @@ type Category = {
 	name: string;
 	priority: number;
 	is_default: boolean;
-	ntfy_enabled: boolean;
+	web_push_enabled: boolean;
 	telegram_enabled: boolean;
-	telegram_chat_id: string | null;
 };
 
 // State

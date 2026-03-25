@@ -5,6 +5,13 @@ from dotenv import load_dotenv
 load_dotenv()  # Load variables from .env
 
 
+def _get_env_bool(name: str) -> bool | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    return value.lower() == "true"
+
+
 class Config:
     # Database Settings
     DB_USER = os.getenv("DB_USER")
@@ -35,7 +42,10 @@ class Config:
 
     # New variables for the Telegram bot and AI
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    PUBLIC_URL = os.getenv("PUBLIC_URL", "http://localhost:2112")  # default for local
+    PUBLIC_URL = os.getenv("PUBLIC_URL")
+    WEB_PUSH_VAPID_PUBLIC_KEY = os.getenv("WEB_PUSH_VAPID_PUBLIC_KEY")
+    WEB_PUSH_VAPID_PRIVATE_KEY = os.getenv("WEB_PUSH_VAPID_PRIVATE_KEY")
+    WEB_PUSH_SUBJECT = os.getenv("WEB_PUSH_SUBJECT")
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
     # OpenAI-Compatible API Settings for AI Content Filtering
@@ -60,7 +70,9 @@ class Config:
     AUTH_ALLOW_PUBLIC_SIGNUP = (
         os.getenv("AUTH_ALLOW_PUBLIC_SIGNUP", "true").lower() == "true"
     )
-    AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "false").lower() == "true"
+    AUTH_COOKIE_SECURE = _get_env_bool("AUTH_COOKIE_SECURE")
+    if AUTH_COOKIE_SECURE is None:
+        AUTH_COOKIE_SECURE = False
     AUTH_ACCESS_COOKIE_NAME = os.getenv("AUTH_ACCESS_COOKIE_NAME", "newsy_access_token")
     AUTH_REFRESH_COOKIE_NAME = os.getenv(
         "AUTH_REFRESH_COOKIE_NAME", "newsy_refresh_token"

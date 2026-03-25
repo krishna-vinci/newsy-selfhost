@@ -29,6 +29,8 @@ RUN npm run build
 FROM node:22-alpine AS production
 WORKDIR /app
 
+RUN apk add --no-cache openssl
+
 # Copy package files
 COPY package*.json ./
 
@@ -37,6 +39,10 @@ RUN npm install --omit=dev
 
 # Copy the built application from the builder stage.
 COPY --from=builder /app/build ./build
+COPY server.js ./server.js
+COPY scripts/start-production.sh ./scripts/start-production.sh
+
+RUN chmod +x ./scripts/start-production.sh
 
 # Expose the application port.
 EXPOSE 3456
@@ -46,4 +52,4 @@ ENV NODE_ENV=production
 ENV PORT=3456
 
 # Start the production server.
-CMD ["node", "build"]
+CMD ["./scripts/start-production.sh"]
