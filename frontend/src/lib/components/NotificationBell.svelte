@@ -91,9 +91,7 @@
 						body: JSON.stringify({ links: [item.link] })
 					});
 				}
-				items = items.map((entry) =>
-					entry.id === item.id ? { ...entry, is_read: true } : entry
-				);
+				items = items.map((entry) => (entry.id === item.id ? { ...entry, is_read: true } : entry));
 				unreadCount = Math.max(0, unreadCount - 1);
 			} catch (error) {
 				console.error('Error marking notification as read:', error);
@@ -129,7 +127,9 @@
 	<Bell class="h-4 w-4" />
 	<span class="sr-only">Open notifications</span>
 	{#if unreadCount > 0}
-		<Badge class="absolute -right-1.5 -top-1.5 h-5 min-w-5 justify-center rounded-full px-1 text-[10px]">
+		<Badge
+			class="absolute -top-1.5 -right-1.5 h-5 min-w-5 justify-center rounded-full px-1 text-[10px]"
+		>
 			{unreadCount > 99 ? '99+' : unreadCount}
 		</Badge>
 	{/if}
@@ -138,12 +138,19 @@
 <Sheet.Root bind:open>
 	<Sheet.Content side="right" class="w-full max-w-md p-0">
 		<Sheet.Header class="border-b p-4 text-left">
-			<div class="flex items-center justify-between gap-4">
+			<div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
 				<div>
 					<Sheet.Title>Notifications</Sheet.Title>
-					<Sheet.Description>Article alerts, filter matches, and delivery updates for your account.</Sheet.Description>
+					<Sheet.Description
+						>Article alerts, filter matches, and delivery updates for your account.</Sheet.Description
+					>
 				</div>
-				<Button variant="ghost" size="sm" onclick={markAllRead} disabled={isMarkingAllRead || unreadCount === 0}>
+				<Button
+					variant="ghost"
+					size="sm"
+					onclick={markAllRead}
+					disabled={isMarkingAllRead || unreadCount === 0}
+				>
 					{#if isMarkingAllRead}
 						<Loader2 class="mr-2 h-4 w-4 animate-spin" />
 					{/if}
@@ -153,7 +160,7 @@
 			</div>
 		</Sheet.Header>
 
-		<div class="max-h-[calc(100vh-88px)] overflow-y-auto p-4">
+		<div class="max-h-[calc(100dvh-96px)] overflow-y-auto p-4">
 			{#if isLoading}
 				<div class="flex items-center justify-center py-12 text-sm text-muted-foreground">
 					<Loader2 class="mr-2 h-4 w-4 animate-spin" />

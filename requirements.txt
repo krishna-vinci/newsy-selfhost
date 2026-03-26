@@ -22,3 +22,4 @@ markdown-it-py
 rapidfuzz
 redis
 rq>=1.15.1
+pywebpush

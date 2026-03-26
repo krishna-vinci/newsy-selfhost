@@ -4,6 +4,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       target: development
+    env_file:
+      - .env
     ports:
       - "3456:3456"
     environment:
@@ -35,6 +37,9 @@ services:
       - "8765:8765"
     env_file:
       - .env
+    environment:
+      # Dev compose should work over plain localhost/IP without secure-cookie issues.
+      - AUTH_COOKIE_SECURE=false
     volumes:
       - .:/app
       - backup_data:/app/data/backups

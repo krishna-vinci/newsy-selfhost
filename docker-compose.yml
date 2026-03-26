@@ -9,14 +9,11 @@ services:
     environment:
       - NODE_ENV=production
       - API_BASE_URL=http://newsy-backend:8765
-      - TLS_EXTRA_HOSTS=${TLS_EXTRA_HOSTS:-}
     restart: unless-stopped
     networks:
       - db-net
     depends_on:
       - newsy-backend
-    volumes:
-      - ./certs:/app/certs
 
   newsy-backend:
     build:
@@ -26,8 +23,6 @@ services:
       - "8765:8765"
     env_file:
       - .env
-    environment:
-      - AUTH_COOKIE_SECURE=true
     volumes:
       - backup_data:/app/data/backups
       - reports_data:/app/reports

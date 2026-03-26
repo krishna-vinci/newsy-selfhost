@@ -3,6 +3,7 @@ import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
@@ -420,10 +421,12 @@ async def list_notifications(request: Request, limit: int = 30):
         await database.release_db_connection(conn)
 
     return JSONResponse(
-        {
-            "items": [dict(row) for row in rows],
-            "unread_count": unread_count or 0,
-        }
+        jsonable_encoder(
+            {
+                "items": [dict(row) for row in rows],
+                "unread_count": unread_count or 0,
+            }
+        )
     )
 
 
