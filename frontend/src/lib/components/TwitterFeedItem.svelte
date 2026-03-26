@@ -1,5 +1,5 @@
 <script lang="ts">
-	import Card from "$lib/components/ui/card/index.svelte";
+	import Card from '$lib/components/ui/card/index.svelte';
 
 	export let item: {
 		title: string;
@@ -20,7 +20,7 @@
 					alt={item.title}
 					class="max-h-full max-w-full rounded-full object-contain"
 					onerror={(e) => {
-						(e.currentTarget as HTMLImageElement).style.display = "none";
+						(e.currentTarget as HTMLImageElement).style.display = 'none';
 					}}
 				/>
 			{/if}

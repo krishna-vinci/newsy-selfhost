@@ -1,7 +1,7 @@
 import { redirect } from '@sveltejs/kit';
 import type { RequestEvent } from '@sveltejs/kit';
 
-const PUBLIC_PATHS = new Set(['/', '/login', '/signup', '/bootstrap']);
+const PUBLIC_PATHS = new Set(['/login', '/signup', '/bootstrap']);
 
 export const load = async ({ fetch, url }: RequestEvent) => {
 	const configResponse = await fetch('/api/auth/config');
@@ -23,10 +23,14 @@ export const load = async ({ fetch, url }: RequestEvent) => {
 	}
 
 	if (!authConfig.bootstrap_required && currentPath === '/bootstrap') {
-		throw redirect(303, user ? '/feeds' : '/login');
+		throw redirect(303, user ? '/' : '/login');
 	}
 
-	if (currentPath === '/signup' && !authConfig.allow_public_signup && !authConfig.bootstrap_required) {
+	if (
+		currentPath === '/signup' &&
+		!authConfig.allow_public_signup &&
+		!authConfig.bootstrap_required
+	) {
 		throw redirect(303, '/login');
 	}
 
@@ -34,9 +38,12 @@ export const load = async ({ fetch, url }: RequestEvent) => {
 		throw redirect(303, `/login?next=${encodeURIComponent(nextTarget)}`);
 	}
 
-	if (user && (currentPath === '/login' || currentPath === '/signup' || currentPath === '/bootstrap')) {
+	if (
+		user &&
+		(currentPath === '/login' || currentPath === '/signup' || currentPath === '/bootstrap')
+	) {
 		const requestedNext = url.searchParams.get('next');
-		throw redirect(303, requestedNext || '/feeds');
+		throw redirect(303, requestedNext || '/');
 	}
 
 	return {

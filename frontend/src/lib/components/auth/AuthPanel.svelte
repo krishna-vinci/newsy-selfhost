@@ -89,7 +89,7 @@
 			}
 
 			await onSuccess();
-			await goto(next || '/feeds', { invalidateAll: true });
+			await goto(next || '/', { invalidateAll: true });
 		} catch (error) {
 			console.error(`${isSignupMode ? 'Sign-up' : 'Sign-in'} failed`, error);
 			errorMessage = `Unable to ${isSignupMode ? 'create your account' : 'sign in'} right now.`;
@@ -115,11 +115,11 @@
 						newsy
 					</div>
 					<h2 class="max-w-lg text-3xl font-semibold tracking-tight text-balance">
-						A more composed way to stay informed.
+						Your self-hosted news aggregator.
 					</h2>
 					<p class="max-w-md text-sm leading-6 text-muted-foreground">
-						Scan what matters, keep the signal close, and step into the full workspace only when you
-						want more depth.
+						Read your favorite RSS feeds, generate focused reports, and keep track of the news
+						without the noise.
 					</p>
 				</div>
 
@@ -137,32 +137,6 @@
 							</div>
 						</div>
 					{/each}
-				</div>
-			</div>
-
-			<div class="relative border-t bg-background/65 p-10">
-				<div class="space-y-3">
-					<div class="text-xs font-semibold tracking-[0.28em] text-muted-foreground uppercase">
-						A quick look inside
-					</div>
-					<div class="space-y-3 rounded-2xl border bg-card p-4 shadow-sm">
-						<div class="flex items-center justify-between gap-3">
-							<div class="text-sm font-medium">Today&apos;s briefing</div>
-							<div class="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
-								Quietly focused
-							</div>
-						</div>
-						<div class="space-y-2">
-							<div class="h-2 rounded-full bg-muted"></div>
-							<div class="h-2 w-4/5 rounded-full bg-muted"></div>
-							<div class="h-2 w-2/3 rounded-full bg-muted"></div>
-						</div>
-						<div class="grid grid-cols-3 gap-2 pt-2 text-xs text-muted-foreground">
-							<div class="rounded-xl border bg-background px-3 py-2">Cards</div>
-							<div class="rounded-xl border bg-background px-3 py-2">Columns</div>
-							<div class="rounded-xl border bg-background px-3 py-2">Reports</div>
-						</div>
-					</div>
 				</div>
 			</div>
 		</div>
@@ -214,11 +188,9 @@
 					</h1>
 					<p class="text-sm leading-6 text-muted-foreground">
 						{#if isSignupMode}
-							Start with a focused home, then move into the full reading workspace when you want
-							more depth.
+							Create an account to start adding and reading your favorite feeds.
 						{:else}
-							Step back into your calm briefing and keep the rest of the feed noise at a comfortable
-							distance.
+							Sign in to access your feeds, reports, and personalized news view.
 						{/if}
 					</p>
 				</div>
@@ -285,9 +257,8 @@
 				<div
 					class="rounded-2xl border bg-muted/35 p-4 text-sm leading-6 text-muted-foreground lg:hidden"
 				>
-					<div class="mb-2 font-medium text-foreground">Inside newsy</div>
-					Focused briefings, flexible reading layouts, and deeper reports when you want more than a quick
-					scan.
+					<div class="mb-2 font-medium text-foreground">Welcome to newsy</div>
+					Your self-hosted news aggregator for feeds, summaries, and reports.
 				</div>
 
 				{#if allowPublicSignup}

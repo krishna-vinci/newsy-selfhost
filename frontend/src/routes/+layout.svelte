@@ -15,6 +15,10 @@
 	import Button from '$lib/components/ui/button/index.svelte';
 
 	let { children, data } = $props();
+	const authPagePaths = ['/login', '/signup', '/bootstrap'];
+	const isAppShellRoute = $derived.by(
+		() => data.auth.isAuthenticated && !authPagePaths.includes($page.url.pathname)
+	);
 
 	onMount(() => {
 		if (window.isSecureContext && 'serviceWorker' in navigator) {
@@ -30,26 +34,21 @@
 <AuthDialog allowPublicSignup={data.auth.allowPublicSignup} />
 
 <div class="flex h-screen flex-col">
-	<header class="flex-shrink-0 border-b px-4 py-3 sm:px-6">
-		<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-			<div class="flex items-center justify-between gap-3 md:flex-1">
+	<header class="flex-shrink-0 border-b px-4 py-2 sm:px-6 sm:py-3">
+		<div class="flex flex-wrap items-center justify-between gap-3 md:flex-nowrap">
+			<div class="flex items-center gap-3 md:flex-1">
 				<a href="/" class="text-xl font-bold sm:text-2xl">newsy</a>
-				<Button onclick={toggleMode} variant="outline" size="icon" class="md:hidden">
-					<SunIcon
-						class="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 !transition-all dark:scale-0 dark:-rotate-90"
-					/>
-					<MoonIcon
-						class="absolute h-[1.2rem] w-[1.2rem] scale-0 rotate-90 !transition-all dark:scale-100 dark:rotate-0"
-					/>
-					<span class="sr-only">Toggle theme</span>
-				</Button>
 			</div>
 
-			<div class="order-3 md:order-2 md:flex-1 md:px-4">
+			<div
+				class={isAppShellRoute
+					? 'order-3 hidden w-full md:order-2 md:block md:w-auto md:flex-1 md:px-4'
+					: 'order-3 w-full md:order-2 md:w-auto md:flex-1 md:px-4'}
+			>
 				<Navbar user={data.auth.user} />
 			</div>
 
-			<div class="order-2 flex flex-wrap items-center gap-2 md:order-3 md:flex-1 md:justify-end">
+			<div class="order-2 flex items-center gap-2 md:order-3 md:flex-1 md:justify-end">
 				{#if data.auth.isAuthenticated}
 					<NotificationBell />
 				{/if}
@@ -57,17 +56,17 @@
 					<Button
 						variant="outline"
 						class="flex-1 sm:flex-none"
-						onclick={() => openAuthDialog('login', '/feeds')}
+						onclick={() => openAuthDialog('login', '/')}
 					>
 						Sign in
 					</Button>
 					{#if data.auth.allowPublicSignup}
-						<Button class="flex-1 sm:flex-none" onclick={() => openAuthDialog('signup', '/feeds')}>
+						<Button class="flex-1 sm:flex-none" onclick={() => openAuthDialog('signup', '/')}>
 							Create account
 						</Button>
 					{/if}
 				{/if}
-				<Button onclick={toggleMode} variant="outline" size="icon" class="hidden md:inline-flex">
+				<Button onclick={toggleMode} variant="outline" size="icon">
 					<SunIcon
 						class="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 !transition-all dark:scale-0 dark:-rotate-90"
 					/>

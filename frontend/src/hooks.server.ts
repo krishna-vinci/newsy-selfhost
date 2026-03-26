@@ -80,7 +80,10 @@ async function proxyApiRequest(
 	);
 }
 
-function buildProxyResponse(upstreamResponse: Response, additionalSetCookies: string[] = []): Response {
+function buildProxyResponse(
+	upstreamResponse: Response,
+	additionalSetCookies: string[] = []
+): Response {
 	const headers = new Headers(upstreamResponse.headers);
 	for (const setCookie of additionalSetCookies) {
 		headers.append('set-cookie', setCookie);

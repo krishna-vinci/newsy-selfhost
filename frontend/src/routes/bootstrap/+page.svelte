@@ -37,7 +37,7 @@
 </script>
 
 <div class="mx-auto flex min-h-full max-w-md items-center px-4 py-12">
-	<div class="bg-card text-card-foreground w-full rounded-xl border p-8 shadow-sm">
+	<div class="w-full rounded-xl border bg-card p-8 text-card-foreground shadow-sm">
 		<div class="mb-6 space-y-2 text-center">
 			<h1 class="text-2xl font-semibold">Bootstrap your first admin</h1>
 			<p class="text-sm text-muted-foreground">
@@ -58,10 +58,18 @@
 
 			<div class="space-y-2">
 				<label class="text-sm font-medium" for="password">Admin password</label>
-				<Input id="password" type="password" bind:value={password} autocomplete="new-password" required />
+				<Input
+					id="password"
+					type="password"
+					bind:value={password}
+					autocomplete="new-password"
+					required
+				/>
 			</div>
 
-			<p class="text-xs text-muted-foreground">Use at least 12 characters and keep this account safe.</p>
+			<p class="text-xs text-muted-foreground">
+				Use at least 12 characters and keep this account safe.
+			</p>
 
 			{#if errorMessage}
 				<p class="text-sm text-destructive">{errorMessage}</p>

@@ -18,6 +18,7 @@
 		Pencil,
 		Trash2,
 		Settings,
+		Send,
 		GripVertical,
 		FileText,
 		Bell,
@@ -330,9 +331,6 @@
 		};
 		editingFeedCategory = category;
 		showEditFeedModal = true;
-		if (sidebar.isMobile) {
-			sidebar.setOpenMobile(false);
-		}
 	}
 
 	function closeEditModal() {
@@ -439,9 +437,6 @@
 		}
 		activeTab = 'categories'; // Reset to categories tab
 		showCategorySettingsModal = true;
-		if (sidebar.isMobile) {
-			sidebar.setOpenMobile(false);
-		}
 	}
 
 	function closeCategorySettings() {
@@ -1356,9 +1351,6 @@
 			<Button
 				onclick={() => {
 					showAddFeedModal = true;
-					if (sidebar.isMobile) {
-						sidebar.setOpenMobile(false);
-					}
 				}}
 				variant="outline"
 				size="sm"
@@ -1611,13 +1603,13 @@
 <!-- Category Settings Modal -->
 <Dialog.Root open={showCategorySettingsModal} onOpenChange={(o) => (showCategorySettingsModal = o)}>
 	<Dialog.Content
-		class="h-[100dvh] max-h-[100dvh] w-[100vw] max-w-[100vw] overflow-hidden rounded-none p-0 sm:h-[90vh] sm:max-h-[90vh] sm:w-full sm:max-w-2xl sm:rounded-lg lg:max-w-4xl xl:max-w-7xl"
+		class="h-[100dvh] max-h-[100dvh] w-[100vw] max-w-[100vw] overflow-hidden rounded-none p-0 sm:h-[90vh] sm:max-h-[90vh] sm:w-full sm:max-w-2xl sm:rounded-lg lg:max-w-4xl xl:max-w-5xl"
 	>
 		<div class="flex h-full min-h-0 flex-col">
 			<div class="border-b px-4 pt-4 pr-12 pb-3 sm:px-6 sm:pt-6 sm:pb-4">
 				<h3 class="text-lg font-semibold">Settings</h3>
 				<p class="mt-1 text-xs text-muted-foreground sm:text-sm">
-					Manage categories, notification delivery, and personal preferences.
+					Categories, alerts, and reading preferences in one place.
 				</p>
 			</div>
 			<Tabs.Root bind:value={activeTab} class="flex min-h-0 flex-1 flex-col">
@@ -1627,27 +1619,34 @@
 					<Tabs.Trigger
 						value="categories"
 						class="h-9 min-w-max shrink-0 snap-start px-3 text-xs sm:text-sm"
-						>Manage Categories</Tabs.Trigger
+						><span class="sm:hidden">Categories</span><span class="hidden sm:inline"
+							>Manage Categories</span
+						></Tabs.Trigger
 					>
 					<Tabs.Trigger
 						value="ai-filters"
 						class="h-9 min-w-max shrink-0 snap-start px-3 text-xs sm:text-sm"
-						>AI Filters</Tabs.Trigger
+						><span class="sm:hidden">Filters</span><span class="hidden sm:inline">AI Filters</span
+						></Tabs.Trigger
 					>
 					<Tabs.Trigger
 						value="preferences"
 						class="h-9 min-w-max shrink-0 snap-start px-3 text-xs sm:text-sm"
-						>Preferences</Tabs.Trigger
+						><span class="sm:hidden">View</span><span class="hidden sm:inline">Preferences</span
+						></Tabs.Trigger
 					>
 					<Tabs.Trigger
 						value="notifications"
 						class="h-9 min-w-max shrink-0 snap-start px-3 text-xs sm:text-sm"
-						>Notifications</Tabs.Trigger
+						><span class="sm:hidden">Alerts</span><span class="hidden sm:inline">Notifications</span
+						></Tabs.Trigger
 					>
 					<Tabs.Trigger
 						value="backup"
 						class="h-9 min-w-max shrink-0 snap-start px-3 text-xs sm:text-sm"
-						>{$page.data.auth?.isAdmin ? 'Backup & Export' : 'Data Export'}</Tabs.Trigger
+						><span class="sm:hidden">Export</span><span class="hidden sm:inline"
+							>{$page.data.auth?.isAdmin ? 'Backup & Export' : 'Data Export'}</span
+						></Tabs.Trigger
 					>
 				</Tabs.List>
 				<Tabs.Content value="categories" class="mt-0 min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
@@ -1705,15 +1704,13 @@
 												</Button>
 											</div>
 										{/if}
-										<p class="text-xs text-muted-foreground">
-											Telegram alerts can be enabled per category after you connect Telegram in the
-											Notifications tab.
-										</p>
 									</div>
 									<div class="flex flex-wrap items-center gap-2 sm:justify-end sm:gap-3">
-										<div class="flex items-center gap-2 rounded-md border px-3 py-2">
+										<div
+											class="flex items-center gap-2 rounded-md border px-3 py-2"
+											title="Push notifications"
+										>
 											<Bell class="h-4 w-4 text-muted-foreground" />
-											<span class="text-xs font-semibold text-muted-foreground">Push</span>
 											<Switch.Switch
 												checked={category.web_push_enabled}
 												onCheckedChange={(checked) => {
@@ -1724,9 +1721,11 @@
 												>{category.web_push_enabled ? 'On' : 'Off'}</span
 											>
 										</div>
-										<div class="flex items-center gap-2 rounded-md border px-3 py-2">
-											<Bell class="h-4 w-4 text-muted-foreground" />
-											<span class="text-xs font-semibold text-muted-foreground">Telegram</span>
+										<div
+											class="flex items-center gap-2 rounded-md border px-3 py-2"
+											title="Telegram notifications"
+										>
+											<Send class="h-4 w-4 text-muted-foreground" />
 											<Switch.Switch
 												checked={category.telegram_enabled}
 												onCheckedChange={(checked) => {
@@ -1780,6 +1779,9 @@
 						</div>
 						{#if aiFilterSubTab === 'prompt'}
 							<div class="space-y-4 p-4">
+								<p class="mb-2 text-sm text-muted-foreground">
+									Enable AI filtering to define a custom prompt for each category.
+								</p>
 								<div class="max-h-[50vh] space-y-4 overflow-y-auto sm:max-h-[60vh]">
 									{#each categoriesList as category (category.id)}
 										<div class="space-y-3 rounded-lg border border-border bg-background p-4">
@@ -1838,10 +1840,6 @@
 														>
 													</div>
 												</div>
-											{:else}
-												<p class="text-xs text-muted-foreground italic">
-													Enable AI filtering to define a custom prompt for this category.
-												</p>
 											{/if}
 										</div>
 									{/each}
@@ -1982,10 +1980,9 @@
 									>
 								</Select.Content>
 							</Select.Root>
-							<div class="mt-2 space-y-1 rounded-md bg-muted p-3 text-xs text-muted-foreground">
-								<p><strong>Card:</strong> Visual grid with thumbnails and descriptions.</p>
-								<p><strong>Headline:</strong> Compact list of article titles.</p>
-								<p><strong>Column:</strong> Split view with list and preview.</p>
+							<div class="mt-2 rounded-md bg-muted p-3 text-xs text-muted-foreground">
+								Card shows more detail, Headline is compact, and Column opens a split view on larger
+								screens.
 							</div>
 						</div>
 						<div class="space-y-2">
@@ -2012,16 +2009,14 @@
 							<div class="mb-3">
 								<h4 class="text-sm font-semibold">In-app inbox</h4>
 								<p class="mt-1 text-xs text-muted-foreground">
-									All users now have an internal notification inbox. Use the bell in the header to
-									review new article alerts.
+									Use the header bell to review alerts and delivery updates.
 								</p>
 							</div>
 							<div class="rounded-md bg-muted p-3 text-xs text-muted-foreground">
-								In-app notifications are always available and do not require any third-party
-								service.
+								In-app alerts always work and need no extra setup.
 							</div>
 							<p class="mt-3 text-xs text-muted-foreground">
-								Browser push and Telegram both respect the category toggles in <strong
+								Push and Telegram both respect the category toggles in <strong
 									>Manage Categories</strong
 								>.
 							</p>
@@ -2034,8 +2029,7 @@
 								<div>
 									<h4 class="text-sm font-semibold">Telegram</h4>
 									<p class="mt-1 text-xs text-muted-foreground">
-										Connect one Telegram chat for your account, then enable Telegram on the
-										categories you want.
+										Connect one Telegram chat, then enable it per category.
 									</p>
 								</div>
 								<Switch.Switch
@@ -2060,8 +2054,7 @@
 											placeholder="Enter your Telegram chat ID"
 										/>
 										<p class="mt-1 text-xs text-muted-foreground">
-											Start your bot first, then get your chat ID from @userinfobot or from your
-											bot's /start conversation.
+											Start your bot first, then paste the chat ID here.
 										</p>
 									</div>
 									<div class="flex flex-wrap gap-2">
@@ -2098,8 +2091,7 @@
 							<div class="mb-3">
 								<h4 class="text-sm font-semibold">Browser push</h4>
 								<p class="mt-1 text-xs text-muted-foreground">
-									Enable browser push to get mobile-style alerts directly from your installed web
-									app.
+									Enable browser alerts on this device.
 								</p>
 							</div>
 							{#if notificationPreferences.web_push.available}

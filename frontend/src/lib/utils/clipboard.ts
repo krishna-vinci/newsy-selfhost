@@ -2,7 +2,8 @@ import { toast } from 'svelte-sonner';
 
 export function copyToClipboard(text: string, successMessage: string = 'Copied to clipboard!') {
 	if (navigator.clipboard && window.isSecureContext) {
-		navigator.clipboard.writeText(text)
+		navigator.clipboard
+			.writeText(text)
 			.then(() => toast.success(successMessage))
 			.catch((err) => {
 				toast.error('Failed to copy');
