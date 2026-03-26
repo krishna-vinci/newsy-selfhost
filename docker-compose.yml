@@ -12,12 +12,13 @@ services:
     restart: unless-stopped
     networks:
       - db-net
-      - caddy-net
     depends_on:
       - newsy-backend
 
   newsy-backend:
-    build: .
+    build:
+      context: .
+      dockerfile: dockerfile
     ports:
       - "8765:8765"
     env_file:
@@ -28,7 +29,6 @@ services:
     restart: unless-stopped
     networks:
       - db-net
-      - caddy-net
     depends_on:
       - newsy_db
       - newsy-redis
@@ -96,6 +96,3 @@ volumes:
 
 networks:
   db-net:
-    external: true  # Make sure this is already created: docker network create db-net
-  caddy-net:
-    external: true

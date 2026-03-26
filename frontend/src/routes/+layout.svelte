@@ -1,42 +1,85 @@
 <script lang="ts">
-  import "../app.css";
-  import { ModeWatcher } from "mode-watcher";
-  import { Toaster } from 'svelte-sonner';
-  import Navbar from '$lib/components/Navbar.svelte';
-  import SunIcon from "@lucide/svelte/icons/sun";
-  import MoonIcon from "@lucide/svelte/icons/moon";
+	import '../app.css';
+	import { onMount } from 'svelte';
+	import { page } from '$app/stores';
+	import { ModeWatcher } from 'mode-watcher';
+	import { Toaster } from 'svelte-sonner';
+	import AuthDialog from '$lib/components/auth/AuthDialog.svelte';
+	import NotificationBell from '$lib/components/NotificationBell.svelte';
+	import Navbar from '$lib/components/Navbar.svelte';
+	import SunIcon from '@lucide/svelte/icons/sun';
+	import MoonIcon from '@lucide/svelte/icons/moon';
 
-  import { toggleMode } from "mode-watcher";
-  import Button from "$lib/components/ui/button/index.svelte";
+	import { openAuthDialog } from '$lib/stores/auth-dialog.ts';
+	import { toggleMode } from 'mode-watcher';
+	import Button from '$lib/components/ui/button/index.svelte';
 
-  let { children } = $props();
+	let { children, data } = $props();
+	const authPagePaths = ['/login', '/signup', '/bootstrap'];
+	const isAppShellRoute = $derived.by(
+		() => data.auth.isAuthenticated && !authPagePaths.includes($page.url.pathname)
+	);
+
+	onMount(() => {
+		if (window.isSecureContext && 'serviceWorker' in navigator) {
+			navigator.serviceWorker.register('/service-worker.js').catch((error) => {
+				console.error('Service worker registration failed:', error);
+			});
+		}
+	});
 </script>
 
 <ModeWatcher />
 <Toaster richColors />
+<AuthDialog allowPublicSignup={data.auth.allowPublicSignup} />
 
-<div class="flex flex-col h-screen">
-  <header class="flex items-center justify-between p-4 border-b flex-shrink-0">
-      <div class="flex-1">
-          <a href="/" class="text-2xl font-bold">newsy</a>
-      </div>
-      <div class="flex-1 flex justify-center">
-          <Navbar />
-      </div>
-      <div class="flex-1 flex justify-end">
-          <Button onclick={toggleMode} variant="outline" size="icon">
-              <SunIcon
-               class="h-[1.2rem] w-[1.2rem] rotate-0 scale-100 !transition-all dark:-rotate-90 dark:scale-0"
-                  />
-                  <MoonIcon
-                   class="absolute h-[1.2rem] w-[1.2rem] rotate-90 scale-0 !transition-all dark:rotate-0 dark:scale-100"
-                  />
-                  <span class="sr-only">Toggle theme</span>
-                 </Button>
-          </div>
-  </header>
+<div class="flex h-screen flex-col">
+	<header class="flex-shrink-0 border-b px-4 py-2 sm:px-6 sm:py-3">
+		<div class="flex flex-wrap items-center justify-between gap-3 md:flex-nowrap">
+			<div class="flex items-center gap-3 md:flex-1">
+				<a href="/" class="text-xl font-bold sm:text-2xl">newsy</a>
+			</div>
 
-  <div class="flex-1 overflow-hidden">
-    {@render children?.()}
-  </div>
+			<div
+				class={isAppShellRoute
+					? 'order-3 hidden w-full md:order-2 md:block md:w-auto md:flex-1 md:px-4'
+					: 'order-3 w-full md:order-2 md:w-auto md:flex-1 md:px-4'}
+			>
+				<Navbar user={data.auth.user} />
+			</div>
+
+			<div class="order-2 flex items-center gap-2 md:order-3 md:flex-1 md:justify-end">
+				{#if data.auth.isAuthenticated}
+					<NotificationBell />
+				{/if}
+				{#if !data.auth.isAuthenticated && !data.auth.bootstrapRequired && !['/login', '/signup', '/bootstrap'].includes($page.url.pathname)}
+					<Button
+						variant="outline"
+						class="flex-1 sm:flex-none"
+						onclick={() => openAuthDialog('login', '/')}
+					>
+						Sign in
+					</Button>
+					{#if data.auth.allowPublicSignup}
+						<Button class="flex-1 sm:flex-none" onclick={() => openAuthDialog('signup', '/')}>
+							Create account
+						</Button>
+					{/if}
+				{/if}
+				<Button onclick={toggleMode} variant="outline" size="icon">
+					<SunIcon
+						class="h-[1.2rem] w-[1.2rem] scale-100 rotate-0 !transition-all dark:scale-0 dark:-rotate-90"
+					/>
+					<MoonIcon
+						class="absolute h-[1.2rem] w-[1.2rem] scale-0 rotate-90 !transition-all dark:scale-100 dark:rotate-0"
+					/>
+					<span class="sr-only">Toggle theme</span>
+				</Button>
+			</div>
+		</div>
+	</header>
+
+	<div class="relative flex-1 overflow-hidden">
+		{@render children?.()}
+	</div>
 </div>

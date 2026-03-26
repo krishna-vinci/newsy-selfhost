@@ -42,7 +42,7 @@ function createSettingsStore() {
 					throw new Error('Failed to update timezone');
 				}
 
-				update(s => ({ ...s, timezone }));
+				update((s) => ({ ...s, timezone }));
 				return true;
 			} catch (error) {
 				console.error('Error updating timezone:', error);
@@ -61,7 +61,7 @@ function createSettingsStore() {
 					throw new Error('Failed to update default view');
 				}
 
-				update(s => ({ ...s, default_view }));
+				update((s) => ({ ...s, default_view }));
 				return true;
 			} catch (error) {
 				console.error('Error updating default view:', error);

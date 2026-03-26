@@ -1,3 +1,12 @@
+# Development stage
+FROM golang:1.21-alpine AS development
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# We use go run for development with sync+restart in docker-compose watch
+CMD ["go", "run", "./cmd/scheduler"]
+
 # Build stage
 FROM golang:1.21-alpine AS builder
 

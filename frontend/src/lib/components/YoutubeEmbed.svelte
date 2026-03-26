@@ -21,7 +21,7 @@
 		const parser = new DOMParser();
 		const doc = parser.parseFromString(htmlContent, 'text/html');
 		const placeholders = doc.querySelectorAll('.youtube-embed-placeholder');
-		
+
 		const ids: string[] = [];
 		placeholders.forEach((placeholder, index) => {
 			const videoId = placeholder.getAttribute('data-youtube-id');
@@ -34,15 +34,15 @@
 				placeholder.replaceWith(marker);
 			}
 		});
-		
+
 		videoIds = ids;
 		processedContent = doc.body.innerHTML;
 	});
 </script>
 
-<div class="article-content prose prose-sm max-w-none dark:prose-invert">
+<div class="article-content prose prose-sm dark:prose-invert max-w-none">
 	{@html processedContent}
-	
+
 	{#each videoIds as videoId, index}
 		<div class="youtube-embed-wrapper" data-video-index={index}>
 			<Youtube id={videoId} />
@@ -57,7 +57,7 @@
 		overflow: hidden;
 		max-width: 100%;
 	}
-	
+
 	.article-content :global(p) {
 		margin-bottom: 1em;
 	}

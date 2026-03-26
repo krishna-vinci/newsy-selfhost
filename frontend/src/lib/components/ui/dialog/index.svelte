@@ -1,8 +1,8 @@
 <script lang="ts">
-	import { Dialog as DialogPrimitive } from "bits-ui";
-	import { cn } from "$lib/utils.js";
-	import { X } from "@lucide/svelte";
-	import { fade, fly } from "svelte/transition";
+	import { Dialog as DialogPrimitive } from 'bits-ui';
+	import { cn } from '$lib/utils.js';
+	import { X } from '@lucide/svelte';
+	import { fade, fly } from 'svelte/transition';
 
 	let {
 		open = $bindable(false),
@@ -33,7 +33,7 @@
 			transition={fly}
 			transitionConfig={{ y: -20, duration: 200 }}
 			class={cn(
-				"fixed left-1/2 top-1/2 z-50 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-card p-6 shadow-lg",
+				'fixed top-1/2 left-1/2 z-50 w-full max-w-2xl -translate-x-1/2 -translate-y-1/2 rounded-xl border bg-card p-6 shadow-lg',
 				className
 			)}
 		>
@@ -47,7 +47,7 @@
 						{/if}
 						{#if closeButton}
 							<DialogPrimitive.Close
-								class="rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none"
+								class="rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-none disabled:pointer-events-none"
 							>
 								<X class="size-4" />
 								<span class="sr-only">Close</span>

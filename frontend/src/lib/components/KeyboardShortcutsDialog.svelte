@@ -23,7 +23,11 @@
 	];
 </script>
 
-<Dialog bind:open title="Keyboard Shortcuts" description="Use these shortcuts to navigate and perform actions faster.">
+<Dialog
+	bind:open
+	title="Keyboard Shortcuts"
+	description="Use these shortcuts to navigate and perform actions faster."
+>
 	<div class="max-h-[60vh] overflow-y-auto">
 		<Table.Root>
 			<Table.Header>
