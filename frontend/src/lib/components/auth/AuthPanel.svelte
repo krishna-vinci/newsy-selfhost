@@ -1,9 +1,12 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { ArrowRight, FileText, LayoutGrid, Sparkles } from '@lucide/svelte';
 	import Button from '$lib/components/ui/button/index.svelte';
 	import Input from '$lib/components/ui/input/index.svelte';
+	import TimezonePicker from '$lib/components/TimezonePicker.svelte';
 	import type { AuthMode } from '$lib/stores/auth-dialog.ts';
+	import { guessBrowserTimezone } from '$lib/utils/timezones.ts';
 
 	type FeatureItem = {
 		title: string;
@@ -49,6 +52,7 @@
 	let username = $state('');
 	let email = $state('');
 	let password = $state('');
+	let signupTimezone = $state('Asia/Kolkata');
 	let errorMessage = $state('');
 	let isSubmitting = $state(false);
 
@@ -63,13 +67,17 @@
 		password = '';
 	});
 
+	onMount(() => {
+		signupTimezone = guessBrowserTimezone('Asia/Kolkata');
+	});
+
 	async function handleSubmit() {
 		isSubmitting = true;
 		errorMessage = '';
 
 		const endpoint = isSignupMode ? '/api/users' : '/api/auth/sign-in';
 		const payload = isSignupMode
-			? { username: username.trim(), email: email.trim(), password }
+			? { username: username.trim(), email: email.trim(), password, timezone: signupTimezone }
 			: { identifier: identifier.trim(), password };
 
 		try {
@@ -212,6 +220,15 @@
 							<label class="text-sm font-medium" for="email">Email</label>
 							<Input id="email" type="email" bind:value={email} autocomplete="email" required />
 						</div>
+
+						<TimezonePicker
+							id="signup-timezone"
+							value={signupTimezone}
+							onChange={(timezone) => {
+								signupTimezone = timezone;
+							}}
+							description="Search by country, city, or timezone. We prefill your browser timezone when available."
+						/>
 					{:else}
 						<div class="space-y-2">
 							<label class="text-sm font-medium" for="identifier">Username or email</label>

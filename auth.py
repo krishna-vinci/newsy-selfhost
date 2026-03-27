@@ -14,12 +14,14 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import pytz
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import database
 from config import Config
+from timezone_catalog import DEFAULT_TIMEZONE, normalize_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ RESERVED_USERNAMES = {
 PUBLIC_API_ENDPOINTS = {
     ("GET", "/api/auth/config"),
     ("GET", "/api/auth/providers"),
+    ("GET", "/api/timezones"),
     ("POST", "/api/auth/sign-in"),
     ("POST", "/api/auth/refresh"),
     ("POST", "/api/auth/sign-out"),
@@ -60,6 +63,7 @@ class UserCreateRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=32)
     email: str = Field(..., min_length=3, max_length=255)
     password: str = Field(..., min_length=12, max_length=128)
+    timezone: str | None = Field(default=None, max_length=128)
 
 
 class SignInRequest(BaseModel):
@@ -200,10 +204,22 @@ def _normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
-def _validate_new_user_payload(payload: UserCreateRequest) -> tuple[str, str, str]:
+def _validate_timezone_value(timezone_name: str | None) -> str:
+    if not timezone_name:
+        return DEFAULT_TIMEZONE
+
+    try:
+        pytz.timezone(timezone_name)
+    except pytz.UnknownTimeZoneError as exc:
+        raise HTTPException(status_code=400, detail="Invalid timezone value") from exc
+    return timezone_name
+
+
+def _validate_new_user_payload(payload: UserCreateRequest) -> tuple[str, str, str, str]:
     username = _normalize_username(payload.username)
     email = _normalize_email(payload.email)
     password = payload.password
+    timezone_name = _validate_timezone_value(payload.timezone)
 
     if not USERNAME_PATTERN.fullmatch(username):
         raise HTTPException(
@@ -221,7 +237,7 @@ def _validate_new_user_payload(payload: UserCreateRequest) -> tuple[str, str, st
             status_code=400, detail="Password must be at least 12 characters long"
         )
 
-    return username, email, password
+    return username, email, password, timezone_name
 
 
 def _serialize_user(row: Any) -> dict[str, Any]:
@@ -283,14 +299,17 @@ def clear_auth_cookies(response: Response) -> None:
     response.delete_cookie(Config.AUTH_REFRESH_COOKIE_NAME, path="/", samesite="lax")
 
 
-async def _ensure_user_preferences(conn: Any, user_id: int) -> None:
+async def _ensure_user_preferences(
+    conn: Any, user_id: int, timezone_name: str = DEFAULT_TIMEZONE
+) -> None:
     await conn.execute(
         """
         INSERT INTO user_preferences (user_id, timezone, default_view)
-        VALUES ($1, 'Asia/Kolkata', 'card')
+        VALUES ($1, $2, 'card')
         ON CONFLICT (user_id) DO NOTHING
         """,
         user_id,
+        normalize_timezone(timezone_name, fallback=DEFAULT_TIMEZONE),
     )
 
 
@@ -528,7 +547,7 @@ async def get_auth_providers() -> JSONResponse:
 async def bootstrap_first_user(
     payload: UserCreateRequest, request: Request
 ) -> JSONResponse:
-    username, email, password = _validate_new_user_payload(payload)
+    username, email, password, timezone_name = _validate_new_user_payload(payload)
     conn = await database.get_db_connection()
 
     try:
@@ -549,7 +568,7 @@ async def bootstrap_first_user(
                 email,
                 _hash_password(password),
             )
-            await _ensure_user_preferences(conn, user_row["id"])
+            await _ensure_user_preferences(conn, user_row["id"], timezone_name)
             await _backfill_legacy_data_for_user(conn, user_row["id"])
             return await _issue_auth_response(conn, user_row=user_row, request=request)
     except HTTPException:
@@ -573,7 +592,7 @@ async def bootstrap_first_user(
 
 @router.post("/api/users")
 async def create_user(payload: UserCreateRequest, request: Request) -> JSONResponse:
-    username, email, password = _validate_new_user_payload(payload)
+    username, email, password, timezone_name = _validate_new_user_payload(payload)
 
     if not Config.AUTH_ALLOW_PUBLIC_SIGNUP:
         raise HTTPException(status_code=403, detail="Public sign-up is disabled")
@@ -598,7 +617,7 @@ async def create_user(payload: UserCreateRequest, request: Request) -> JSONRespo
                 email,
                 _hash_password(password),
             )
-            await _ensure_user_preferences(conn, user_row["id"])
+            await _ensure_user_preferences(conn, user_row["id"], timezone_name)
             return await _issue_auth_response(conn, user_row=user_row, request=request)
     except HTTPException:
         raise

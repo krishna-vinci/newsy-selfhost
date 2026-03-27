@@ -83,6 +83,16 @@ import keyword_filter  # Import keyword/topic filtering module
 import cache  # Import cache module
 import internal_api  # Import internal API for Go scheduler
 import notifications
+from feed_ingestion import (
+    INITIAL_IMPORT_ENTRY_LIMIT,
+    POLL_ENTRY_SCAN_LIMIT,
+    get_entry_timestamp,
+)
+from timezone_catalog import (
+    DEFAULT_TIMEZONE,
+    build_timezone_options,
+    normalize_timezone,
+)
 from youtube_embed import convert_links_to_embeds
 
 load_dotenv()  # Load environment variables
@@ -500,8 +510,9 @@ async def parse_and_store_rss_feed(
         new_last_update = last_update or threshold
 
         conn = await get_db_connection()
+        articles_added = 0
 
-        for entry in feed.entries:
+        for entry in list(feed.entries)[:POLL_ENTRY_SCAN_LIMIT]:
             title = getattr(entry, "title", "Untitled")
             link = getattr(entry, "link", "#")
             description = getattr(entry, "summary", "No description available.")
@@ -512,32 +523,13 @@ async def parse_and_store_rss_feed(
             elif "media_content" in entry:
                 thumbnail_url = entry.media_content[0].get("url")
 
-            raw_published = getattr(entry, "published", None) or getattr(
-                entry, "updated", None
-            )
-            published_formatted = format_datetime(raw_published, source_name)
+            raw_published, pub_dt = get_entry_timestamp(entry, rss_url)
+            published_formatted = format_datetime(pub_dt or raw_published, source_name)
 
-            struct = getattr(entry, "published_parsed", None) or getattr(
-                entry, "updated_parsed", None
-            )
-            if struct:
-                dt_utc = datetime.fromtimestamp(time.mktime(struct), tz=pytz.utc)
-                pub_dt = dt_utc.astimezone(IST)
-            else:
-                try:
-                    pub_dt = date_parser.parse(raw_published) if raw_published else None
-                    pub_dt = (
-                        pub_dt
-                        if pub_dt and pub_dt.tzinfo
-                        else (IST.localize(pub_dt) if pub_dt else None)
-                    )
-                except Exception:
-                    pub_dt = None
-
-            if not pub_dt or pub_dt <= threshold:
+            if pub_dt and pub_dt <= threshold:
                 continue
 
-            if pub_dt > new_last_update:
+            if pub_dt and pub_dt > new_last_update:
                 new_last_update = pub_dt
 
             if await conn.fetchval(
@@ -554,25 +546,31 @@ async def parse_and_store_rss_feed(
                 article_content = None
 
             # Insert article and get its ID
-            article_id = await conn.fetchval(
-                "INSERT INTO articles "
-                "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
-                "RETURNING id",
-                user_id,
-                category_id,
-                title,
-                link,
-                description,
-                thumbnail_url,
-                published_formatted,
-                pub_dt,
-                category,
-                article_content,
-                source_name,
-                feed_id,
-                rss_url,
-            )
+            try:
+                article_id = await conn.fetchval(
+                    "INSERT INTO articles "
+                    "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
+                    "RETURNING id",
+                    user_id,
+                    category_id,
+                    title,
+                    link,
+                    description,
+                    thumbnail_url,
+                    published_formatted,
+                    pub_dt,
+                    category,
+                    article_content,
+                    source_name,
+                    feed_id,
+                    rss_url,
+                )
+            except asyncpg.UniqueViolationError:
+                logging.info("Article already stored for user %s: %s", user_id, link)
+                continue
+
+            articles_added += 1
 
             # Process with AI filter if enabled for this category (only for NEW articles)
             try:
@@ -622,7 +620,7 @@ async def parse_and_store_rss_feed(
             await update_feed_last_update(rss_url, new_last_update)
             logging.info("Updated feed state for %s → %s", rss_url, new_last_update)
 
-            # Invalidate feed caches after new articles are added
+        if articles_added > 0:
             if user_id is not None:
                 cache.invalidate_feeds_cache(user_id)
             else:
@@ -644,7 +642,8 @@ async def parse_and_store_rss_feed_initial(
 ):
     """
     Initial synchronous feed fetch - stores only basic article data (no full-text extraction).
-    This is fast and provides immediate feedback when adding a new feed.
+    Imports only the latest visible entries up to a safe cap so feeds can be added
+    without overwhelming the database or silently dropping valid older playlist items.
     """
     logging.debug("Initial parsing of feed URL: %s for category: %s", rss_url, category)
     try:
@@ -655,7 +654,9 @@ async def parse_and_store_rss_feed_initial(
             resp.raise_for_status()
         feed = feedparser.parse(resp.content)
 
-        # For initial fetch, go back 10 days
+        # Track the newest timestamp we see for feed state, but do not reject older
+        # entries during initial import. A capped initial import is more robust than
+        # a date-only cutoff for feeds like YouTube playlists.
         threshold = datetime.now(IST) - timedelta(days=10)
         new_last_update = threshold
 
@@ -663,7 +664,7 @@ async def parse_and_store_rss_feed_initial(
         articles_added = 0
 
         try:
-            for entry in feed.entries:
+            for entry in list(feed.entries)[:INITIAL_IMPORT_ENTRY_LIMIT]:
                 title = getattr(entry, "title", "Untitled")
                 link = getattr(entry, "link", "#")
                 description = getattr(entry, "summary", "No description available.")
@@ -674,34 +675,12 @@ async def parse_and_store_rss_feed_initial(
                 elif "media_content" in entry:
                     thumbnail_url = entry.media_content[0].get("url")
 
-                raw_published = getattr(entry, "published", None) or getattr(
-                    entry, "updated", None
+                raw_published, pub_dt = get_entry_timestamp(entry, rss_url)
+                published_formatted = format_datetime(
+                    pub_dt or raw_published, source_name
                 )
-                published_formatted = format_datetime(raw_published, source_name)
 
-                struct = getattr(entry, "published_parsed", None) or getattr(
-                    entry, "updated_parsed", None
-                )
-                if struct:
-                    dt_utc = datetime.fromtimestamp(time.mktime(struct), tz=pytz.utc)
-                    pub_dt = dt_utc.astimezone(IST)
-                else:
-                    try:
-                        pub_dt = (
-                            date_parser.parse(raw_published) if raw_published else None
-                        )
-                        pub_dt = (
-                            pub_dt
-                            if pub_dt and pub_dt.tzinfo
-                            else (IST.localize(pub_dt) if pub_dt else None)
-                        )
-                    except Exception:
-                        pub_dt = None
-
-                if not pub_dt or pub_dt <= threshold:
-                    continue
-
-                if pub_dt > new_last_update:
+                if pub_dt and pub_dt > new_last_update:
                     new_last_update = pub_dt
 
                 if await conn.fetchval(
@@ -715,25 +694,31 @@ async def parse_and_store_rss_feed_initial(
                 article_content = None
 
                 # Insert article and get its ID
-                article_id = await conn.fetchval(
-                    "INSERT INTO articles "
-                    "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
-                    "RETURNING id",
-                    user_id,
-                    category_id,
-                    title,
-                    link,
-                    description,
-                    thumbnail_url,
-                    published_formatted,
-                    pub_dt,
-                    category,
-                    article_content,
-                    source_name,
-                    feed_id,
-                    rss_url,
-                )
+                try:
+                    article_id = await conn.fetchval(
+                        "INSERT INTO articles "
+                        "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
+                        "RETURNING id",
+                        user_id,
+                        category_id,
+                        title,
+                        link,
+                        description,
+                        thumbnail_url,
+                        published_formatted,
+                        pub_dt,
+                        category,
+                        article_content,
+                        source_name,
+                        feed_id,
+                        rss_url,
+                    )
+                except asyncpg.UniqueViolationError:
+                    logging.info(
+                        "Article already stored for user %s: %s", user_id, link
+                    )
+                    continue
                 articles_added += 1
 
                 # Process with AI filter if enabled for this category (only for NEW articles)
@@ -890,14 +875,13 @@ async def fetch_all_feeds_db():
 async def get_total_articles_count(
     user_id: int,
     category: str = None,
-    days: int = 2,
+    days: int | None = 2,
     starred_only: bool = False,
     search_query: str = None,
     feed_url: str = None,
     view: str = "standard",
 ):
     """Get total count of articles for pagination."""
-    threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
 
     try:
@@ -906,7 +890,7 @@ async def get_total_articles_count(
             "FROM articles a",
             'JOIN feeds f ON a.feed_id = f.id AND f."isActive" = true',
         ]
-        params = [user_id, threshold]
+        params = [user_id]
 
         if view == "ai":
             query.append(
@@ -916,7 +900,11 @@ async def get_total_articles_count(
         query.append(
             "LEFT JOIN user_article_state uas ON uas.article_id = a.id AND uas.user_id = $1"
         )
-        query.append("WHERE a.user_id = $1 AND a.published_datetime >= $2")
+        query.append("WHERE a.user_id = $1")
+
+        if days is not None:
+            params.append(datetime.now(IST) - timedelta(days=days))
+            query.append(f"AND a.published_datetime >= ${len(params)}")
 
         if category:
             params.append(category)
@@ -949,7 +937,9 @@ async def get_user_timezone(user_id: int):
             "SELECT timezone FROM user_preferences WHERE user_id = $1",
             user_id,
         )
-        return pytz.timezone(timezone_str) if timezone_str else IST
+        return pytz.timezone(normalize_timezone(timezone_str)) if timezone_str else IST
+    except pytz.UnknownTimeZoneError:
+        return IST
     finally:
         await database.release_db_connection(conn)
 
@@ -995,14 +985,13 @@ async def convert_article_timezone(article: dict, target_tz):
 async def get_articles_for_category_db(
     user_id: int,
     category: str,
-    days: int = 2,
+    days: int | None = 2,
     starred_only: bool = False,
     limit: int = None,
     offset: int = None,
     target_tz=None,
     view: str = "standard",
 ):
-    threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
 
     query = [
@@ -1011,16 +1000,18 @@ async def get_articles_for_category_db(
         'JOIN feeds f ON a.feed_id = f.id AND f."isActive" = true',
         "LEFT JOIN user_article_state uas ON uas.article_id = a.id AND uas.user_id = $1",
     ]
-    params = [user_id, category, threshold]
+    params = [user_id, category]
 
     if view == "ai":
         query.append(
             "JOIN article_ai_matches aam ON aam.article_id = a.id AND aam.user_id = $1"
         )
 
-    query.append(
-        "WHERE a.user_id = $1 AND a.category = $2 AND a.published_datetime >= $3"
-    )
+    query.append("WHERE a.user_id = $1 AND a.category = $2")
+
+    if days is not None:
+        params.append(datetime.now(IST) - timedelta(days=days))
+        query.append(f"AND a.published_datetime >= ${len(params)}")
 
     if starred_only:
         query.append("AND COALESCE(uas.is_saved, false) = true")
@@ -1062,7 +1053,7 @@ async def get_articles_for_category_db(
 
 async def get_all_articles_paginated(
     user_id: int,
-    days: int = 2,
+    days: int | None = 2,
     starred_only: bool = False,
     limit: int = 100,
     offset: int = 0,
@@ -1072,7 +1063,6 @@ async def get_all_articles_paginated(
     view: str = "standard",
 ):
     """Get articles across all categories with pagination."""
-    threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
 
     try:
@@ -1082,14 +1072,18 @@ async def get_all_articles_paginated(
             'JOIN feeds f ON a.feed_id = f.id AND f."isActive" = true',
             "LEFT JOIN user_article_state uas ON uas.article_id = a.id AND uas.user_id = $1",
         ]
-        params = [user_id, threshold]
+        params = [user_id]
 
         if view == "ai":
             query.append(
                 "JOIN article_ai_matches aam ON aam.article_id = a.id AND aam.user_id = $1"
             )
 
-        query.append("WHERE a.user_id = $1 AND a.published_datetime >= $2")
+        query.append("WHERE a.user_id = $1")
+
+        if days is not None:
+            params.append(datetime.now(IST) - timedelta(days=days))
+            query.append(f"AND a.published_datetime >= ${len(params)}")
 
         if category:
             params.append(category)
@@ -1407,11 +1401,10 @@ async def search_articles(
     query: str,
     category: str = None,
     feed_url: str = None,
-    days: int = 30,
+    days: int | None = 30,
     score_threshold: float = None,
 ) -> list:
     """Search user-owned articles directly in Postgres to avoid cross-user leaks."""
-    threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
 
     try:
@@ -1420,12 +1413,19 @@ async def search_articles(
             "FROM articles a",
             'JOIN feeds f ON a.feed_id = f.id AND f."isActive" = true',
             "LEFT JOIN user_article_state uas ON uas.article_id = a.id AND uas.user_id = $1",
-            "WHERE a.user_id = $1 AND a.published_datetime >= $2",
+            "WHERE a.user_id = $1",
         ]
-        params = [user_id, threshold, f"%{query}%"]
+
+        params = [user_id]
+        if days is not None:
+            params.append(datetime.now(IST) - timedelta(days=days))
+            sql.append(f"AND a.published_datetime >= ${len(params)}")
+
+        params.append(f"%{query}%")
+        search_param = len(params)
 
         sql.append(
-            "AND (a.title ILIKE $3 OR a.description ILIKE $3 OR a.content ILIKE $3 OR a.source ILIKE $3)"
+            f"AND (a.title ILIKE ${search_param} OR a.description ILIKE ${search_param} OR a.content ILIKE ${search_param} OR a.source ILIKE ${search_param})"
         )
 
         if category:
@@ -1628,8 +1628,8 @@ async def update_feeds_config(request: Request):
 @app.get("/api/feeds")
 async def feeds(
     request: Request,
-    days: int = Query(
-        10, description="Number of days back to fetch articles for.", ge=1, le=30
+    days: int | None = Query(
+        None, description="Number of days back to fetch articles for.", ge=1, le=3650
     ),
     q: str = Query(None, description="Search query for articles"),
     category: str = Query(None, description="Category filter for search"),
@@ -1658,12 +1658,13 @@ async def feeds(
     - If neither is provided, returns standard feed view grouped by category
     """
     user = require_request_user(request)
+    effective_days = days if days is not None else (None if feed_url else 10)
 
     # Check cache first
     cache_key = cache.generate_cache_key(
         "feeds",
         user_id=user["id"],
-        days=days,
+        days=effective_days,
         q=q,
         category=category,
         feed_url=feed_url,
@@ -1686,7 +1687,7 @@ async def feeds(
         # Get paginated articles
         articles = await get_all_articles_paginated(
             user["id"],
-            days=days,
+            days=effective_days,
             starred_only=starred_only,
             limit=limit,
             offset=offset,
@@ -1699,7 +1700,7 @@ async def feeds(
         # Apply search filter if provided
         if q:
             search_results = await search_articles(
-                user["id"], q, category=category, feed_url=feed_url, days=days
+                user["id"], q, category=category, feed_url=feed_url, days=effective_days
             )
             if starred_only:
                 search_results = [
@@ -1716,7 +1717,7 @@ async def feeds(
             total_count = await get_total_articles_count(
                 user["id"],
                 category=category,
-                days=days,
+                days=effective_days,
                 starred_only=starred_only,
                 search_query=q,
                 feed_url=feed_url,
@@ -1738,7 +1739,7 @@ async def feeds(
     # Handle search queries (non-paginated)
     if q:
         search_results = await search_articles(
-            user["id"], q, category=category, feed_url=feed_url, days=days
+            user["id"], q, category=category, feed_url=feed_url, days=effective_days
         )
 
         # Apply starred filter if requested
@@ -1787,7 +1788,7 @@ async def feeds(
             articles = await get_articles_for_category_db(
                 user["id"],
                 cat,
-                days=days,
+                days=effective_days,
                 starred_only=starred_only,
                 target_tz=user_tz,
                 view=view,
@@ -1801,6 +1802,16 @@ async def feeds(
 
     finally:
         await database.release_db_connection(conn)
+
+
+@app.get("/api/timezones")
+async def list_timezones():
+    return JSONResponse(
+        {
+            "default": DEFAULT_TIMEZONE,
+            "timezones": build_timezone_options(),
+        }
+    )
 
 
 @app.post("/api/article/star")
@@ -2400,7 +2411,9 @@ async def get_settings(request: Request):
             user["id"],
         )
         settings = {
-            "timezone": row["timezone"] if row else "Asia/Kolkata",
+            "timezone": normalize_timezone(
+                row["timezone"] if row else DEFAULT_TIMEZONE
+            ),
             "default_view": row["default_view"] if row else "card",
         }
         return JSONResponse(content=settings)
@@ -2422,7 +2435,10 @@ async def update_settings(request: Request):
                 user["id"],
             )
             timezone = body.get(
-                "timezone", existing["timezone"] if existing else "Asia/Kolkata"
+                "timezone",
+                normalize_timezone(
+                    existing["timezone"] if existing else DEFAULT_TIMEZONE
+                ),
             )
             default_view = body.get(
                 "default_view", existing["default_view"] if existing else "card"
