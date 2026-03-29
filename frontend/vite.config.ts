@@ -18,6 +18,7 @@ function parseAllowedHosts(value?: string): true | string[] | undefined {
 }
 
 const allowedHosts = parseAllowedHosts(process.env.DEV_ALLOWED_HOSTS);
+const apiBaseUrl = process.env.API_BASE_URL || 'http://127.0.0.1:8765';
 
 export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
@@ -26,7 +27,7 @@ export default defineConfig({
 		allowedHosts,
 		proxy: {
 			'/api': {
-				target: 'http://newsy-backend:8765',
+				target: apiBaseUrl,
 				changeOrigin: true
 			}
 		}

@@ -1,0 +1,13 @@
+.venv/
+.venv312/
+.git/
+.gitignore
+.ruff_cache/
+.cache/
+.cache-test/
+__pycache__/
+*.pyc
+server.log
+server.pid
+*.md
+templates/

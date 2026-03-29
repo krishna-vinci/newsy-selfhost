@@ -11,6 +11,7 @@
 	import * as Switch from '$lib/components/ui/switch/index.ts';
 	import * as Tabs from '$lib/components/ui/tabs/index.js';
 	import * as Dialog from '$lib/components/ui/dialog/index.ts';
+	import TimezonePicker from '$lib/components/TimezonePicker.svelte';
 	import {
 		ChevronDown,
 		Plus,
@@ -1985,23 +1986,18 @@
 								screens.
 							</div>
 						</div>
-						<div class="space-y-2">
-							<label class="text-sm font-medium">Timezone</label>
-							<Select.Root type="single" bind:value={selectedTimezone}>
-								<Select.Trigger class="w-full"
-									>{selectedTimezone === 'Asia/Kolkata'
-										? 'IST (Asia/Kolkata)'
-										: 'UTC'}</Select.Trigger
-								>
-								<Select.Content>
-									<Select.Item value="Asia/Kolkata" onclick={() => updateTimezone('Asia/Kolkata')}
-										>IST (Asia/Kolkata)</Select.Item
-									>
-									<Select.Item value="UTC" onclick={() => updateTimezone('UTC')}>UTC</Select.Item>
-								</Select.Content>
-							</Select.Root>
-						</div>
+					<div class="space-y-2">
+						<TimezonePicker
+							id="settings-timezone-search"
+							value={selectedTimezone}
+							onChange={(timezone) => {
+								selectedTimezone = timezone;
+								updateTimezone(timezone);
+							}}
+							description="Search by country, city, or timezone name."
+						/>
 					</div>
+				</div>
 				</Tabs.Content>
 				<Tabs.Content value="notifications" class="mt-0 min-h-0 flex-1 overflow-y-auto">
 					<div class="space-y-4 p-4 sm:p-5">

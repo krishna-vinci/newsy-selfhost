@@ -64,6 +64,7 @@ import io
 import subprocess
 import xml.etree.ElementTree as ET
 from typing import List
+from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel
 
 from config import Config  # Import our centralized config
@@ -83,40 +84,25 @@ import keyword_filter  # Import keyword/topic filtering module
 import cache  # Import cache module
 import internal_api  # Import internal API for Go scheduler
 import notifications
+from feed_ingestion import (
+    INITIAL_IMPORT_ENTRY_LIMIT,
+    POLL_ENTRY_SCAN_LIMIT,
+    get_entry_timestamp,
+)
+from timezone_catalog import (
+    DEFAULT_TIMEZONE,
+    build_timezone_options,
+    normalize_timezone,
+)
 from youtube_embed import convert_links_to_embeds
 
 load_dotenv()  # Load environment variables
 
-# --- Global Configuration & Feed Variables ---
-RSS_FEED_URLS = {
-    "reddit": [
-        {
-            "name": "r/Indiaspeaks",
-            "url": f"http://{Config.RSSBRIDGE_HOST}/?action=display&bridge=RedditBridge&context=single&r=IndiaSpeaks&f=&score=50&d=hot&search=&frontend=https%3A%2F%2Fold.reddit.com&format=Atom",
-        },
-        {
-            "name": "worldnews",
-            "url": f"http://{Config.RSSBRIDGE_HOST}/?action=display&bridge=RedditBridge&context=single&r=selfhosted&f=&score=&d=top&search=&frontend=https%3A%2F%2Fold.reddit.com&format=Atom",
-        },
-    ],
-    "youtube": [
-        {
-            "name": "Prof K Nageshwar",
-            "url": f"{Config.RSSBRIDGE_HOST}/?action=display&bridge=YoutubeBridge&context=By+channel+id&c=UCm40kSg56qfys19NtzgXAAg&duration_min=10&duration_max=&format=Atom",
-        },
-        {
-            "name": "Prasadtech",
-            "url": f"{Config.RSSBRIDGE_HOST}/?action=display&bridge=YoutubeBridge&context=By+channel+id&c=UCb-xXZ7ltTvrh9C6DgB9H-Q&duration_min=2&duration_max=&format=Atom",
-        },
-    ],
-    "twitter": [{"name": "Twitter Feed", "url": "https://rss.xcancel.com/POTUS/rss"}],
-    "google": [
-        {
-            "name": "Google Trends",
-            "url": "https://trends.google.com/trending/rss?geo=IN",
-        }
-    ],
-}
+# --- Legacy sample feed configuration ---
+# RSS_FEED_URLS used to contain hard-coded RSS Bridge examples, but it is no longer
+# used anywhere in the application. Keep it empty so config cleanup does not break
+# backend startup when optional legacy env vars are removed.
+RSS_FEED_URLS = {}
 
 # The feeds.json file is no longer the source of truth. The database is.
 # The file is now only used to populate the database on the first run.
@@ -202,6 +188,284 @@ def truncate_words(text, max_words=100):
 
 # Register the filter with your Jinja2Templates
 templates.env.filters["truncate_words"] = truncate_words
+
+
+DISCOVERY_MODE_ALIASES = {
+    "smart": "smart",
+    "resolve": "smart",
+    "website": "website",
+    "feedsearch": "website",
+    "youtube": "youtube",
+    "reddit": "reddit",
+}
+
+
+def normalize_discovery_mode(mode: str) -> str | None:
+    if not mode:
+        return "smart"
+    return DISCOVERY_MODE_ALIASES.get(mode.strip().lower())
+
+
+def normalize_website_discovery_query(query: str) -> str:
+    trimmed = query.strip()
+    if not trimmed:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    candidate = trimmed
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", candidate):
+        candidate = f"https://{candidate}"
+
+    parsed = urlparse(candidate)
+    hostname = (parsed.hostname or "").strip()
+    if not hostname or "." not in hostname:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a full website URL or a valid domain for website discovery.",
+        )
+
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Only http and https website URLs are supported.",
+        )
+
+    normalized = parsed._replace(fragment="")
+    return urlunparse(normalized)
+
+
+def clean_discovery_string(value):
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return value
+
+
+def normalize_discovery_attribution(payload):
+    if not isinstance(payload, dict):
+        return None
+
+    label = clean_discovery_string(payload.get("label"))
+    url = clean_discovery_string(payload.get("url"))
+    if not label or not url:
+        return None
+
+    return {"label": label, "url": url}
+
+
+def normalize_discovery_preview_items(items):
+    preview_items = []
+    if not isinstance(items, list):
+        return preview_items
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        title = clean_discovery_string(item.get("title"))
+        url = clean_discovery_string(item.get("url"))
+        if not title or not url:
+            continue
+
+        preview_items.append(
+            {
+                "title": title,
+                "url": url,
+                "published": clean_discovery_string(item.get("published")) or "",
+                "author": clean_discovery_string(item.get("author")) or "",
+                "badge": clean_discovery_string(item.get("badge")) or "",
+            }
+        )
+
+    return preview_items
+
+
+def normalize_discovery_feed(raw_feed: dict):
+    url = clean_discovery_string(raw_feed.get("url") or raw_feed.get("self_url"))
+    if not url:
+        return None
+
+    label = (
+        clean_discovery_string(raw_feed.get("label"))
+        or clean_discovery_string(raw_feed.get("title"))
+        or clean_discovery_string(raw_feed.get("site_name"))
+        or url
+    )
+    count = raw_feed.get("count")
+    if not isinstance(count, int):
+        count = (
+            raw_feed.get("item_count")
+            if isinstance(raw_feed.get("item_count"), int)
+            else None
+        )
+
+    score = raw_feed.get("score")
+    if not isinstance(score, (int, float)):
+        score = None
+
+    return {
+        "label": label,
+        "url": url,
+        "type": clean_discovery_string(raw_feed.get("type"))
+        or clean_discovery_string(raw_feed.get("version"))
+        or clean_discovery_string(raw_feed.get("content_type"))
+        or "feed",
+        "external": bool(raw_feed.get("external", True)),
+        "count": count,
+        "description": clean_discovery_string(raw_feed.get("description")),
+        "is_podcast": bool(raw_feed.get("is_podcast", False)),
+        "favicon": clean_discovery_string(raw_feed.get("favicon")),
+        "site_name": clean_discovery_string(raw_feed.get("site_name")),
+        "site_url": clean_discovery_string(raw_feed.get("site_url")),
+        "title": clean_discovery_string(raw_feed.get("title")),
+        "score": score,
+        "last_updated": clean_discovery_string(raw_feed.get("last_updated")),
+        "content_type": clean_discovery_string(raw_feed.get("content_type")),
+        "version": clean_discovery_string(raw_feed.get("version")),
+    }
+
+
+def deduplicate_discovery_feeds(raw_feeds):
+    unique_feeds = {}
+    for raw_feed in raw_feeds or []:
+        if not isinstance(raw_feed, dict):
+            continue
+
+        normalized_feed = normalize_discovery_feed(raw_feed)
+        if not normalized_feed:
+            continue
+
+        existing = unique_feeds.get(normalized_feed["url"])
+        if existing is None:
+            unique_feeds[normalized_feed["url"]] = normalized_feed
+            continue
+
+        existing_score = existing.get("score")
+        new_score = normalized_feed.get("score")
+        existing_count = existing.get("count") or -1
+        new_count = normalized_feed.get("count") or -1
+
+        if (new_score or -1) > (existing_score or -1) or (
+            new_score == existing_score and new_count > existing_count
+        ):
+            unique_feeds[normalized_feed["url"]] = normalized_feed
+
+    return sorted(
+        unique_feeds.values(),
+        key=lambda feed: (
+            -(feed.get("score") if feed.get("score") is not None else -1),
+            -(feed.get("count") if feed.get("count") is not None else -1),
+            (feed.get("label") or "").lower(),
+        ),
+    )
+
+
+def normalize_discovery_metadata(metadata, result_count: int):
+    cleaned_metadata = {}
+    if isinstance(metadata, dict):
+        cleaned_metadata = {
+            key: value for key, value in metadata.items() if key != "favicon_data_uri"
+        }
+    cleaned_metadata["result_count"] = result_count
+    return cleaned_metadata
+
+
+def normalize_resolved_discovery_response(mode: str, payload: dict):
+    feeds = deduplicate_discovery_feeds(payload.get("feeds") or [])
+    return {
+        "mode": mode,
+        "source": clean_discovery_string(payload.get("source")) or mode,
+        "input": clean_discovery_string(payload.get("input")) or "",
+        "entity_name": clean_discovery_string(payload.get("entity_name"))
+        or "Untitled source",
+        "entity_url": clean_discovery_string(payload.get("entity_url")),
+        "feeds": feeds,
+        "preview_items": normalize_discovery_preview_items(
+            payload.get("preview_items") or []
+        ),
+        "preview_feed_label": clean_discovery_string(payload.get("preview_feed_label")),
+        "attribution": normalize_discovery_attribution(payload.get("attribution")),
+        "metadata": normalize_discovery_metadata(payload.get("metadata"), len(feeds)),
+    }
+
+
+def normalize_feedsearch_discovery_response(
+    original_query: str, normalized_query: str, payload: dict
+):
+    feeds = deduplicate_discovery_feeds(payload.get("results") or [])
+    parsed_query = urlparse(normalized_query)
+    primary_feed = feeds[0] if feeds else {}
+
+    metadata = normalize_discovery_metadata(
+        {"query": payload.get("query") or normalized_query}, len(feeds)
+    )
+
+    return {
+        "mode": "website",
+        "source": "website",
+        "input": original_query,
+        "entity_name": primary_feed.get("site_name")
+        or primary_feed.get("title")
+        or parsed_query.hostname
+        or normalized_query,
+        "entity_url": primary_feed.get("site_url") or normalized_query,
+        "feeds": feeds,
+        "preview_items": [],
+        "preview_feed_label": None,
+        "attribution": normalize_discovery_attribution(payload.get("attribution")),
+        "metadata": metadata,
+    }
+
+
+async def fetch_discovery_service_payload(path: str, params: dict):
+    try:
+        async with httpx.AsyncClient(
+            timeout=Config.FEED_DISCOVERY_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(
+                f"{Config.FEED_DISCOVERY_API_BASE_URL}{path}", params=params
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="Feed discovery service timed out. Please try again.",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Feed discovery service is currently unavailable.",
+        ) from exc
+
+    if response.is_error:
+        detail = "Feed discovery request failed."
+        try:
+            error_payload = response.json()
+            if isinstance(error_payload, dict):
+                detail = (
+                    clean_discovery_string(error_payload.get("detail"))
+                    or clean_discovery_string(error_payload.get("error"))
+                    or detail
+                )
+        except ValueError:
+            pass
+
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Feed discovery service returned an invalid response.",
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Feed discovery service returned an unexpected response shape.",
+        )
+
+    return payload
 
 
 # --- Database Setup ---
@@ -500,8 +764,9 @@ async def parse_and_store_rss_feed(
         new_last_update = last_update or threshold
 
         conn = await get_db_connection()
+        articles_added = 0
 
-        for entry in feed.entries:
+        for entry in list(feed.entries)[:POLL_ENTRY_SCAN_LIMIT]:
             title = getattr(entry, "title", "Untitled")
             link = getattr(entry, "link", "#")
             description = getattr(entry, "summary", "No description available.")
@@ -512,32 +777,13 @@ async def parse_and_store_rss_feed(
             elif "media_content" in entry:
                 thumbnail_url = entry.media_content[0].get("url")
 
-            raw_published = getattr(entry, "published", None) or getattr(
-                entry, "updated", None
-            )
-            published_formatted = format_datetime(raw_published, source_name)
+            raw_published, pub_dt = get_entry_timestamp(entry, rss_url)
+            published_formatted = format_datetime(pub_dt or raw_published, source_name)
 
-            struct = getattr(entry, "published_parsed", None) or getattr(
-                entry, "updated_parsed", None
-            )
-            if struct:
-                dt_utc = datetime.fromtimestamp(time.mktime(struct), tz=pytz.utc)
-                pub_dt = dt_utc.astimezone(IST)
-            else:
-                try:
-                    pub_dt = date_parser.parse(raw_published) if raw_published else None
-                    pub_dt = (
-                        pub_dt
-                        if pub_dt and pub_dt.tzinfo
-                        else (IST.localize(pub_dt) if pub_dt else None)
-                    )
-                except Exception:
-                    pub_dt = None
-
-            if not pub_dt or pub_dt <= threshold:
+            if pub_dt and pub_dt <= threshold:
                 continue
 
-            if pub_dt > new_last_update:
+            if pub_dt and pub_dt > new_last_update:
                 new_last_update = pub_dt
 
             if await conn.fetchval(
@@ -554,25 +800,31 @@ async def parse_and_store_rss_feed(
                 article_content = None
 
             # Insert article and get its ID
-            article_id = await conn.fetchval(
-                "INSERT INTO articles "
-                "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
-                "RETURNING id",
-                user_id,
-                category_id,
-                title,
-                link,
-                description,
-                thumbnail_url,
-                published_formatted,
-                pub_dt,
-                category,
-                article_content,
-                source_name,
-                feed_id,
-                rss_url,
-            )
+            try:
+                article_id = await conn.fetchval(
+                    "INSERT INTO articles "
+                    "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
+                    "RETURNING id",
+                    user_id,
+                    category_id,
+                    title,
+                    link,
+                    description,
+                    thumbnail_url,
+                    published_formatted,
+                    pub_dt,
+                    category,
+                    article_content,
+                    source_name,
+                    feed_id,
+                    rss_url,
+                )
+            except asyncpg.UniqueViolationError:
+                logging.info("Article already stored for user %s: %s", user_id, link)
+                continue
+
+            articles_added += 1
 
             # Process with AI filter if enabled for this category (only for NEW articles)
             try:
@@ -622,7 +874,7 @@ async def parse_and_store_rss_feed(
             await update_feed_last_update(rss_url, new_last_update)
             logging.info("Updated feed state for %s → %s", rss_url, new_last_update)
 
-            # Invalidate feed caches after new articles are added
+        if articles_added > 0:
             if user_id is not None:
                 cache.invalidate_feeds_cache(user_id)
             else:
@@ -644,7 +896,8 @@ async def parse_and_store_rss_feed_initial(
 ):
     """
     Initial synchronous feed fetch - stores only basic article data (no full-text extraction).
-    This is fast and provides immediate feedback when adding a new feed.
+    Imports only the latest visible entries up to a safe cap so feeds can be added
+    without overwhelming the database or silently dropping valid older playlist items.
     """
     logging.debug("Initial parsing of feed URL: %s for category: %s", rss_url, category)
     try:
@@ -655,7 +908,9 @@ async def parse_and_store_rss_feed_initial(
             resp.raise_for_status()
         feed = feedparser.parse(resp.content)
 
-        # For initial fetch, go back 10 days
+        # Track the newest timestamp we see for feed state, but do not reject older
+        # entries during initial import. A capped initial import is more robust than
+        # a date-only cutoff for feeds like YouTube playlists.
         threshold = datetime.now(IST) - timedelta(days=10)
         new_last_update = threshold
 
@@ -663,7 +918,7 @@ async def parse_and_store_rss_feed_initial(
         articles_added = 0
 
         try:
-            for entry in feed.entries:
+            for entry in list(feed.entries)[:INITIAL_IMPORT_ENTRY_LIMIT]:
                 title = getattr(entry, "title", "Untitled")
                 link = getattr(entry, "link", "#")
                 description = getattr(entry, "summary", "No description available.")
@@ -674,34 +929,12 @@ async def parse_and_store_rss_feed_initial(
                 elif "media_content" in entry:
                     thumbnail_url = entry.media_content[0].get("url")
 
-                raw_published = getattr(entry, "published", None) or getattr(
-                    entry, "updated", None
+                raw_published, pub_dt = get_entry_timestamp(entry, rss_url)
+                published_formatted = format_datetime(
+                    pub_dt or raw_published, source_name
                 )
-                published_formatted = format_datetime(raw_published, source_name)
 
-                struct = getattr(entry, "published_parsed", None) or getattr(
-                    entry, "updated_parsed", None
-                )
-                if struct:
-                    dt_utc = datetime.fromtimestamp(time.mktime(struct), tz=pytz.utc)
-                    pub_dt = dt_utc.astimezone(IST)
-                else:
-                    try:
-                        pub_dt = (
-                            date_parser.parse(raw_published) if raw_published else None
-                        )
-                        pub_dt = (
-                            pub_dt
-                            if pub_dt and pub_dt.tzinfo
-                            else (IST.localize(pub_dt) if pub_dt else None)
-                        )
-                    except Exception:
-                        pub_dt = None
-
-                if not pub_dt or pub_dt <= threshold:
-                    continue
-
-                if pub_dt > new_last_update:
+                if pub_dt and pub_dt > new_last_update:
                     new_last_update = pub_dt
 
                 if await conn.fetchval(
@@ -715,25 +948,31 @@ async def parse_and_store_rss_feed_initial(
                 article_content = None
 
                 # Insert article and get its ID
-                article_id = await conn.fetchval(
-                    "INSERT INTO articles "
-                    "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
-                    "RETURNING id",
-                    user_id,
-                    category_id,
-                    title,
-                    link,
-                    description,
-                    thumbnail_url,
-                    published_formatted,
-                    pub_dt,
-                    category,
-                    article_content,
-                    source_name,
-                    feed_id,
-                    rss_url,
-                )
+                try:
+                    article_id = await conn.fetchval(
+                        "INSERT INTO articles "
+                        "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
+                        "RETURNING id",
+                        user_id,
+                        category_id,
+                        title,
+                        link,
+                        description,
+                        thumbnail_url,
+                        published_formatted,
+                        pub_dt,
+                        category,
+                        article_content,
+                        source_name,
+                        feed_id,
+                        rss_url,
+                    )
+                except asyncpg.UniqueViolationError:
+                    logging.info(
+                        "Article already stored for user %s: %s", user_id, link
+                    )
+                    continue
                 articles_added += 1
 
                 # Process with AI filter if enabled for this category (only for NEW articles)
@@ -890,14 +1129,13 @@ async def fetch_all_feeds_db():
 async def get_total_articles_count(
     user_id: int,
     category: str = None,
-    days: int = 2,
+    days: int | None = 2,
     starred_only: bool = False,
     search_query: str = None,
     feed_url: str = None,
     view: str = "standard",
 ):
     """Get total count of articles for pagination."""
-    threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
 
     try:
@@ -906,7 +1144,7 @@ async def get_total_articles_count(
             "FROM articles a",
             'JOIN feeds f ON a.feed_id = f.id AND f."isActive" = true',
         ]
-        params = [user_id, threshold]
+        params = [user_id]
 
         if view == "ai":
             query.append(
@@ -916,7 +1154,11 @@ async def get_total_articles_count(
         query.append(
             "LEFT JOIN user_article_state uas ON uas.article_id = a.id AND uas.user_id = $1"
         )
-        query.append("WHERE a.user_id = $1 AND a.published_datetime >= $2")
+        query.append("WHERE a.user_id = $1")
+
+        if days is not None:
+            params.append(datetime.now(IST) - timedelta(days=days))
+            query.append(f"AND a.published_datetime >= ${len(params)}")
 
         if category:
             params.append(category)
@@ -949,7 +1191,9 @@ async def get_user_timezone(user_id: int):
             "SELECT timezone FROM user_preferences WHERE user_id = $1",
             user_id,
         )
-        return pytz.timezone(timezone_str) if timezone_str else IST
+        return pytz.timezone(normalize_timezone(timezone_str)) if timezone_str else IST
+    except pytz.UnknownTimeZoneError:
+        return IST
     finally:
         await database.release_db_connection(conn)
 
@@ -995,14 +1239,13 @@ async def convert_article_timezone(article: dict, target_tz):
 async def get_articles_for_category_db(
     user_id: int,
     category: str,
-    days: int = 2,
+    days: int | None = 2,
     starred_only: bool = False,
     limit: int = None,
     offset: int = None,
     target_tz=None,
     view: str = "standard",
 ):
-    threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
 
     query = [
@@ -1011,16 +1254,18 @@ async def get_articles_for_category_db(
         'JOIN feeds f ON a.feed_id = f.id AND f."isActive" = true',
         "LEFT JOIN user_article_state uas ON uas.article_id = a.id AND uas.user_id = $1",
     ]
-    params = [user_id, category, threshold]
+    params = [user_id, category]
 
     if view == "ai":
         query.append(
             "JOIN article_ai_matches aam ON aam.article_id = a.id AND aam.user_id = $1"
         )
 
-    query.append(
-        "WHERE a.user_id = $1 AND a.category = $2 AND a.published_datetime >= $3"
-    )
+    query.append("WHERE a.user_id = $1 AND a.category = $2")
+
+    if days is not None:
+        params.append(datetime.now(IST) - timedelta(days=days))
+        query.append(f"AND a.published_datetime >= ${len(params)}")
 
     if starred_only:
         query.append("AND COALESCE(uas.is_saved, false) = true")
@@ -1062,7 +1307,7 @@ async def get_articles_for_category_db(
 
 async def get_all_articles_paginated(
     user_id: int,
-    days: int = 2,
+    days: int | None = 2,
     starred_only: bool = False,
     limit: int = 100,
     offset: int = 0,
@@ -1072,7 +1317,6 @@ async def get_all_articles_paginated(
     view: str = "standard",
 ):
     """Get articles across all categories with pagination."""
-    threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
 
     try:
@@ -1082,14 +1326,18 @@ async def get_all_articles_paginated(
             'JOIN feeds f ON a.feed_id = f.id AND f."isActive" = true',
             "LEFT JOIN user_article_state uas ON uas.article_id = a.id AND uas.user_id = $1",
         ]
-        params = [user_id, threshold]
+        params = [user_id]
 
         if view == "ai":
             query.append(
                 "JOIN article_ai_matches aam ON aam.article_id = a.id AND aam.user_id = $1"
             )
 
-        query.append("WHERE a.user_id = $1 AND a.published_datetime >= $2")
+        query.append("WHERE a.user_id = $1")
+
+        if days is not None:
+            params.append(datetime.now(IST) - timedelta(days=days))
+            query.append(f"AND a.published_datetime >= ${len(params)}")
 
         if category:
             params.append(category)
@@ -1407,11 +1655,10 @@ async def search_articles(
     query: str,
     category: str = None,
     feed_url: str = None,
-    days: int = 30,
+    days: int | None = 30,
     score_threshold: float = None,
 ) -> list:
     """Search user-owned articles directly in Postgres to avoid cross-user leaks."""
-    threshold = datetime.now(IST) - timedelta(days=days)
     conn = await get_db_connection()
 
     try:
@@ -1420,12 +1667,19 @@ async def search_articles(
             "FROM articles a",
             'JOIN feeds f ON a.feed_id = f.id AND f."isActive" = true',
             "LEFT JOIN user_article_state uas ON uas.article_id = a.id AND uas.user_id = $1",
-            "WHERE a.user_id = $1 AND a.published_datetime >= $2",
+            "WHERE a.user_id = $1",
         ]
-        params = [user_id, threshold, f"%{query}%"]
+
+        params = [user_id]
+        if days is not None:
+            params.append(datetime.now(IST) - timedelta(days=days))
+            sql.append(f"AND a.published_datetime >= ${len(params)}")
+
+        params.append(f"%{query}%")
+        search_param = len(params)
 
         sql.append(
-            "AND (a.title ILIKE $3 OR a.description ILIKE $3 OR a.content ILIKE $3 OR a.source ILIKE $3)"
+            f"AND (a.title ILIKE ${search_param} OR a.description ILIKE ${search_param} OR a.content ILIKE ${search_param} OR a.source ILIKE ${search_param})"
         )
 
         if category:
@@ -1628,8 +1882,8 @@ async def update_feeds_config(request: Request):
 @app.get("/api/feeds")
 async def feeds(
     request: Request,
-    days: int = Query(
-        10, description="Number of days back to fetch articles for.", ge=1, le=30
+    days: int | None = Query(
+        None, description="Number of days back to fetch articles for.", ge=1, le=3650
     ),
     q: str = Query(None, description="Search query for articles"),
     category: str = Query(None, description="Category filter for search"),
@@ -1658,12 +1912,13 @@ async def feeds(
     - If neither is provided, returns standard feed view grouped by category
     """
     user = require_request_user(request)
+    effective_days = days if days is not None else (None if feed_url else 10)
 
     # Check cache first
     cache_key = cache.generate_cache_key(
         "feeds",
         user_id=user["id"],
-        days=days,
+        days=effective_days,
         q=q,
         category=category,
         feed_url=feed_url,
@@ -1686,7 +1941,7 @@ async def feeds(
         # Get paginated articles
         articles = await get_all_articles_paginated(
             user["id"],
-            days=days,
+            days=effective_days,
             starred_only=starred_only,
             limit=limit,
             offset=offset,
@@ -1699,7 +1954,7 @@ async def feeds(
         # Apply search filter if provided
         if q:
             search_results = await search_articles(
-                user["id"], q, category=category, feed_url=feed_url, days=days
+                user["id"], q, category=category, feed_url=feed_url, days=effective_days
             )
             if starred_only:
                 search_results = [
@@ -1716,7 +1971,7 @@ async def feeds(
             total_count = await get_total_articles_count(
                 user["id"],
                 category=category,
-                days=days,
+                days=effective_days,
                 starred_only=starred_only,
                 search_query=q,
                 feed_url=feed_url,
@@ -1738,7 +1993,7 @@ async def feeds(
     # Handle search queries (non-paginated)
     if q:
         search_results = await search_articles(
-            user["id"], q, category=category, feed_url=feed_url, days=days
+            user["id"], q, category=category, feed_url=feed_url, days=effective_days
         )
 
         # Apply starred filter if requested
@@ -1787,7 +2042,7 @@ async def feeds(
             articles = await get_articles_for_category_db(
                 user["id"],
                 cat,
-                days=days,
+                days=effective_days,
                 starred_only=starred_only,
                 target_tz=user_tz,
                 view=view,
@@ -1801,6 +2056,101 @@ async def feeds(
 
     finally:
         await database.release_db_connection(conn)
+
+
+@app.get("/api/discovery/search")
+async def discover_feeds(
+    request: Request,
+    query: str = Query(..., min_length=1, max_length=500),
+    mode: str = Query("smart"),
+    include_preview: bool = Query(True),
+    preview_limit: int = Query(4, ge=1, le=20),
+    reddit_limit: int = Query(10, ge=1, le=100),
+    feedsearch_info: bool = Query(True),
+    feedsearch_favicon: bool = Query(True),
+    feedsearch_skip_crawl: bool = Query(False),
+):
+    user = require_request_user(request)
+    resolved_mode = normalize_discovery_mode(mode)
+    if not resolved_mode:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid discovery mode. Use smart, website, youtube, or reddit.",
+        )
+
+    trimmed_query = query.strip()
+    if not trimmed_query:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    if resolved_mode == "website":
+        normalized_query = normalize_website_discovery_query(trimmed_query)
+        payload = await fetch_discovery_service_payload(
+            "/api/v1/feedsearch/search",
+            {
+                "url": normalized_query,
+                "info": feedsearch_info,
+                "favicon": feedsearch_favicon,
+                "skip_crawl": feedsearch_skip_crawl,
+            },
+        )
+        normalized_response = normalize_feedsearch_discovery_response(
+            trimmed_query, normalized_query, payload
+        )
+    elif resolved_mode == "youtube":
+        payload = await fetch_discovery_service_payload(
+            "/api/v1/youtube/resolve",
+            {
+                "query": trimmed_query,
+                "include_preview": include_preview,
+                "preview_limit": preview_limit,
+            },
+        )
+        normalized_response = normalize_resolved_discovery_response("youtube", payload)
+    elif resolved_mode == "reddit":
+        payload = await fetch_discovery_service_payload(
+            "/api/v1/reddit/resolve",
+            {
+                "query": trimmed_query,
+                "limit": reddit_limit,
+                "include_preview": include_preview,
+                "preview_limit": preview_limit,
+            },
+        )
+        normalized_response = normalize_resolved_discovery_response("reddit", payload)
+    else:
+        payload = await fetch_discovery_service_payload(
+            "/api/v1/resolve",
+            {
+                "query": trimmed_query,
+                "reddit_limit": reddit_limit,
+                "include_preview": include_preview,
+                "preview_limit": preview_limit,
+                "feedsearch_info": feedsearch_info,
+                "feedsearch_favicon": feedsearch_favicon,
+                "feedsearch_skip_crawl": feedsearch_skip_crawl,
+            },
+        )
+        normalized_response = normalize_resolved_discovery_response("smart", payload)
+
+    logging.info(
+        "[FeedDiscovery] user_id=%s mode=%s query=%s feeds=%s",
+        user["id"],
+        resolved_mode,
+        trimmed_query[:120],
+        len(normalized_response.get("feeds") or []),
+    )
+
+    return JSONResponse(normalized_response)
+
+
+@app.get("/api/timezones")
+async def list_timezones():
+    return JSONResponse(
+        {
+            "default": DEFAULT_TIMEZONE,
+            "timezones": build_timezone_options(),
+        }
+    )
 
 
 @app.post("/api/article/star")
@@ -2400,7 +2750,9 @@ async def get_settings(request: Request):
             user["id"],
         )
         settings = {
-            "timezone": row["timezone"] if row else "Asia/Kolkata",
+            "timezone": normalize_timezone(
+                row["timezone"] if row else DEFAULT_TIMEZONE
+            ),
             "default_view": row["default_view"] if row else "card",
         }
         return JSONResponse(content=settings)
@@ -2422,7 +2774,10 @@ async def update_settings(request: Request):
                 user["id"],
             )
             timezone = body.get(
-                "timezone", existing["timezone"] if existing else "Asia/Kolkata"
+                "timezone",
+                normalize_timezone(
+                    existing["timezone"] if existing else DEFAULT_TIMEZONE
+                ),
             )
             default_view = body.get(
                 "default_view", existing["default_view"] if existing else "card"

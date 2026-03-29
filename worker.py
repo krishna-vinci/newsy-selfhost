@@ -22,6 +22,7 @@ import database
 import ai_filter
 import keyword_filter
 import cache
+from feed_ingestion import POLL_ENTRY_SCAN_LIMIT, get_entry_timestamp
 import notifications
 from youtube_embed import convert_links_to_embeds
 
@@ -286,7 +287,7 @@ async def parse_and_store_rss_feed(
             )
             new_last_update = threshold
 
-            for entry in feed.entries:
+            for entry in list(feed.entries)[:POLL_ENTRY_SCAN_LIMIT]:
                 title = getattr(entry, "title", "Untitled")
                 link = getattr(entry, "link", "#")
                 description = getattr(entry, "summary", "No description available.")
@@ -298,36 +299,18 @@ async def parse_and_store_rss_feed(
                 elif "media_content" in entry:
                     thumbnail_url = entry.media_content[0].get("url")
 
-                # Parse published date
-                raw_published = getattr(entry, "published", None) or getattr(
-                    entry, "updated", None
+                # Parse published date. YouTube playlist feeds may need `updated`
+                # to reflect newly surfaced playlist items.
+                raw_published, pub_dt = get_entry_timestamp(entry, rss_url)
+                published_formatted = format_datetime(
+                    pub_dt or raw_published, source_name
                 )
-                published_formatted = format_datetime(raw_published, source_name)
-
-                struct = getattr(entry, "published_parsed", None) or getattr(
-                    entry, "updated_parsed", None
-                )
-                if struct:
-                    dt_utc = datetime.fromtimestamp(time.mktime(struct), tz=pytz.utc)
-                    pub_dt = dt_utc.astimezone(IST)
-                else:
-                    try:
-                        pub_dt = (
-                            date_parser.parse(raw_published) if raw_published else None
-                        )
-                        pub_dt = (
-                            pub_dt
-                            if pub_dt and pub_dt.tzinfo
-                            else (IST.localize(pub_dt) if pub_dt else None)
-                        )
-                    except Exception:
-                        pub_dt = None
 
                 # Skip old articles
-                if not pub_dt or pub_dt <= threshold:
+                if pub_dt and pub_dt <= threshold:
                     continue
 
-                if pub_dt > new_last_update:
+                if pub_dt and pub_dt > new_last_update:
                     new_last_update = pub_dt
 
                 # Check if article already exists
@@ -358,25 +341,29 @@ async def parse_and_store_rss_feed(
                     article_content = convert_links_to_embeds(article_content)
 
                 # Insert article and get its ID
-                article_id = await conn.fetchval(
-                    "INSERT INTO articles "
-                    "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
-                    "RETURNING id",
-                    user_id,
-                    category_id,
-                    title,
-                    link,
-                    description,
-                    thumbnail_url,
-                    published_formatted,
-                    pub_dt,
-                    category,
-                    article_content,
-                    source_name,
-                    feed_id,
-                    rss_url,
-                )
+                try:
+                    article_id = await conn.fetchval(
+                        "INSERT INTO articles "
+                        "(user_id, category_id, title, link, description, thumbnail, published, published_datetime, category, content, source, feed_id, feed_url) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) "
+                        "RETURNING id",
+                        user_id,
+                        category_id,
+                        title,
+                        link,
+                        description,
+                        thumbnail_url,
+                        published_formatted,
+                        pub_dt,
+                        category,
+                        article_content,
+                        source_name,
+                        feed_id,
+                        rss_url,
+                    )
+                except asyncpg.UniqueViolationError:
+                    logger.info("Article already stored for user %s: %s", user_id, link)
+                    continue
 
                 articles_added += 1
                 logger.info(f"Added article: {title}")
@@ -445,6 +432,8 @@ async def parse_and_store_rss_feed(
 
             if new_last_update and new_last_update > threshold:
                 logger.info(f"Updated feed state for {source_name}")
+
+            if articles_added > 0:
                 cache.invalidate_feeds_cache(user_id)
 
         finally:

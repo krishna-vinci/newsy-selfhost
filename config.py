@@ -28,9 +28,12 @@ class Config:
     REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
     REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 
-    # Other Services / API Keys
-    RSSBRIDGE_HOST = os.getenv("RSSBRIDGE_HOST", "http://91/99.19.202:3333")
-    NITTER_URL = os.getenv("NITTER_URL", "https://nitter.space")
+    FEED_DISCOVERY_API_BASE_URL = os.getenv(
+        "FEED_DISCOVERY_API_BASE_URL", "http://127.0.0.1:3460"
+    ).rstrip("/")
+    FEED_DISCOVERY_TIMEOUT_SECONDS = float(
+        os.getenv("FEED_DISCOVERY_TIMEOUT_SECONDS", "20")
+    )
 
     # Data Retention Policy
     DEFAULT_ARTICLE_RETENTION_DAYS = int(
@@ -46,6 +49,8 @@ class Config:
     WEB_PUSH_VAPID_PUBLIC_KEY = os.getenv("WEB_PUSH_VAPID_PUBLIC_KEY")
     WEB_PUSH_VAPID_PRIVATE_KEY = os.getenv("WEB_PUSH_VAPID_PRIVATE_KEY")
     WEB_PUSH_SUBJECT = os.getenv("WEB_PUSH_SUBJECT")
+    YOUR_SITE_URL = os.getenv("YOUR_SITE_URL", os.getenv("PUBLIC_URL", ""))
+    YOUR_SITE_NAME = os.getenv("YOUR_SITE_NAME", "Newsy")
     OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
     # OpenAI-Compatible API Settings for AI Content Filtering

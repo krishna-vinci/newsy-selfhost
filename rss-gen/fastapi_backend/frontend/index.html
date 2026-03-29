@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RSS Gen</title>
+    <meta name="description" content="Generate RSS feeds for YouTube, Reddit, and websites with a lightweight standalone app.">
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="/">RSS<span>Gen</span></a>
+        <div class="topbar-actions">
+          <a class="ghost-button" href="/docs" target="_blank" rel="noreferrer">API docs</a>
+          <button class="theme-button" type="button" data-theme-toggle aria-label="Toggle theme">☀</button>
+        </div>
+      </header>
+
+      <section class="hero card">
+        <div class="hero-copy">
+          <h1>Discover RSS feeds instantly.</h1>
+          <p class="hero-text">
+            Find feed URLs for YouTube channels, subreddits, websites, and podcasts — ready to paste into any reader.
+          </p>
+        </div>
+
+        <!-- Source type hints -->
+        <div class="source-hints">
+          <div class="source-hint">
+            <span class="hint-badge hint-yt">YT</span>
+            <code>@mkbhd</code>
+            <span class="hint-sep">or</span>
+            <code>youtube.com/…</code>
+          </div>
+          <div class="hint-divider"></div>
+          <div class="source-hint">
+            <span class="hint-badge hint-reddit">r/</span>
+            <code>r/selfhosted</code>
+          </div>
+          <div class="hint-divider"></div>
+          <div class="source-hint">
+            <span class="hint-badge hint-web">🌐</span>
+            <code>arstechnica.com</code>
+            <span class="hint-sep">· works for podcasts too</span>
+          </div>
+        </div>
+
+        <form class="resolver-form" data-resolver-form>
+          <div class="input-row">
+            <div class="input-wrap">
+              <svg class="input-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8.5" cy="8.5" r="5.5"/><line x1="12.5" y1="12.5" x2="18" y2="18"/></svg>
+              <input
+                id="query"
+                name="query"
+                class="text-input"
+                type="text"
+                placeholder="@handle, r/subreddit, or website.com …"
+                autocomplete="off"
+                spellcheck="false"
+                required
+              >
+              <kbd class="kbd-hint" data-kbd-hint>/</kbd>
+            </div>
+            <button class="primary-button" type="submit">
+              <span>Find feeds</span>
+              <svg class="btn-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M4 10h12M12 4l6 6-6 6"/></svg>
+            </button>
+          </div>
+
+          <button class="options-toggle" type="button" data-options-toggle>
+            Options
+            <svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6l4 4 4-4"/></svg>
+          </button>
+
+          <div class="form-options collapsed" data-form-options>
+            <label class="inline-field" for="reddit-limit">
+              <span>Reddit posts</span>
+              <select id="reddit-limit" name="reddit_limit" class="select-input">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="15">15</option>
+                <option value="20">20</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+              </select>
+            </label>
+            <label class="checkbox-field">
+              <input id="include-preview" name="include_preview" type="checkbox" checked>
+              <span>Show preview items</span>
+            </label>
+          </div>
+        </form>
+
+        <div class="examples">
+          <span class="examples-label">Try:</span>
+          <button class="example-pill" type="button" data-example="@mkbhd">@mkbhd</button>
+          <button class="example-pill" type="button" data-example="r/selfhosted">r/selfhosted</button>
+          <button class="example-pill" type="button" data-example="arstechnica.com">arstechnica.com</button>
+          <button class="example-pill" type="button" data-example="relay.fm">relay.fm 🎙</button>
+        </div>
+      </section>
+
+      <section class="status-row" aria-live="polite">
+        <div class="status-card hidden" data-loading>
+          <div class="spinner"></div>
+          <span>Resolving feeds…</span>
+        </div>
+        <div class="status-card error hidden" data-error></div>
+      </section>
+
+      <section class="results hidden" data-results>
+        <div class="result-header card">
+          <div class="result-meta-row">
+            <span class="source-badge" data-source-badge></span>
+            <a class="entity-link hidden" data-entity-link target="_blank" rel="noreferrer">Open source ↗</a>
+          </div>
+          <h2 data-entity-name>Results</h2>
+          <p class="result-subtitle" data-result-subtitle></p>
+        </div>
+
+        <div class="result-grid">
+          <section class="card">
+            <div class="section-heading-row">
+              <h3>Feed URLs</h3>
+              <div class="section-tools">
+                <div class="format-toggle hidden" data-format-toggle>
+                  <button class="format-button active" type="button" data-format="rss">RSS</button>
+                  <button class="format-button" type="button" data-format="atom">Atom</button>
+                </div>
+                <span class="section-meta" data-feed-count></span>
+              </div>
+            </div>
+            <div class="feed-list" data-feed-list></div>
+          </section>
+
+          <section class="card preview-panel hidden" data-preview-panel>
+            <div class="section-heading-row">
+              <h3>Latest</h3>
+              <span class="section-meta" data-preview-label></span>
+            </div>
+            <div class="preview-list" data-preview-list></div>
+          </section>
+        </div>
+
+        <section class="card attribution-panel hidden" data-attribution-panel>
+          <p class="section-heading">Provider</p>
+          <p class="attribution-copy" data-attribution-copy></p>
+        </section>
+      </section>
+
+      <footer class="footer">
+        <span>RSS<strong>Gen</strong></span>
+        <span class="footer-sep">·</span>
+        <a href="/docs" target="_blank" rel="noreferrer">API</a>
+        <span class="footer-sep">·</span>
+        <span class="footer-muted">Self-hosted RSS discovery</span>
+      </footer>
+    </main>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
