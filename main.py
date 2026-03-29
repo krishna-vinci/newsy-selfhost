@@ -64,6 +64,7 @@ import io
 import subprocess
 import xml.etree.ElementTree as ET
 from typing import List
+from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel
 
 from config import Config  # Import our centralized config
@@ -97,36 +98,11 @@ from youtube_embed import convert_links_to_embeds
 
 load_dotenv()  # Load environment variables
 
-# --- Global Configuration & Feed Variables ---
-RSS_FEED_URLS = {
-    "reddit": [
-        {
-            "name": "r/Indiaspeaks",
-            "url": f"http://{Config.RSSBRIDGE_HOST}/?action=display&bridge=RedditBridge&context=single&r=IndiaSpeaks&f=&score=50&d=hot&search=&frontend=https%3A%2F%2Fold.reddit.com&format=Atom",
-        },
-        {
-            "name": "worldnews",
-            "url": f"http://{Config.RSSBRIDGE_HOST}/?action=display&bridge=RedditBridge&context=single&r=selfhosted&f=&score=&d=top&search=&frontend=https%3A%2F%2Fold.reddit.com&format=Atom",
-        },
-    ],
-    "youtube": [
-        {
-            "name": "Prof K Nageshwar",
-            "url": f"{Config.RSSBRIDGE_HOST}/?action=display&bridge=YoutubeBridge&context=By+channel+id&c=UCm40kSg56qfys19NtzgXAAg&duration_min=10&duration_max=&format=Atom",
-        },
-        {
-            "name": "Prasadtech",
-            "url": f"{Config.RSSBRIDGE_HOST}/?action=display&bridge=YoutubeBridge&context=By+channel+id&c=UCb-xXZ7ltTvrh9C6DgB9H-Q&duration_min=2&duration_max=&format=Atom",
-        },
-    ],
-    "twitter": [{"name": "Twitter Feed", "url": "https://rss.xcancel.com/POTUS/rss"}],
-    "google": [
-        {
-            "name": "Google Trends",
-            "url": "https://trends.google.com/trending/rss?geo=IN",
-        }
-    ],
-}
+# --- Legacy sample feed configuration ---
+# RSS_FEED_URLS used to contain hard-coded RSS Bridge examples, but it is no longer
+# used anywhere in the application. Keep it empty so config cleanup does not break
+# backend startup when optional legacy env vars are removed.
+RSS_FEED_URLS = {}
 
 # The feeds.json file is no longer the source of truth. The database is.
 # The file is now only used to populate the database on the first run.
@@ -212,6 +188,284 @@ def truncate_words(text, max_words=100):
 
 # Register the filter with your Jinja2Templates
 templates.env.filters["truncate_words"] = truncate_words
+
+
+DISCOVERY_MODE_ALIASES = {
+    "smart": "smart",
+    "resolve": "smart",
+    "website": "website",
+    "feedsearch": "website",
+    "youtube": "youtube",
+    "reddit": "reddit",
+}
+
+
+def normalize_discovery_mode(mode: str) -> str | None:
+    if not mode:
+        return "smart"
+    return DISCOVERY_MODE_ALIASES.get(mode.strip().lower())
+
+
+def normalize_website_discovery_query(query: str) -> str:
+    trimmed = query.strip()
+    if not trimmed:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    candidate = trimmed
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", candidate):
+        candidate = f"https://{candidate}"
+
+    parsed = urlparse(candidate)
+    hostname = (parsed.hostname or "").strip()
+    if not hostname or "." not in hostname:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a full website URL or a valid domain for website discovery.",
+        )
+
+    if parsed.scheme not in {"http", "https"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Only http and https website URLs are supported.",
+        )
+
+    normalized = parsed._replace(fragment="")
+    return urlunparse(normalized)
+
+
+def clean_discovery_string(value):
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    return value
+
+
+def normalize_discovery_attribution(payload):
+    if not isinstance(payload, dict):
+        return None
+
+    label = clean_discovery_string(payload.get("label"))
+    url = clean_discovery_string(payload.get("url"))
+    if not label or not url:
+        return None
+
+    return {"label": label, "url": url}
+
+
+def normalize_discovery_preview_items(items):
+    preview_items = []
+    if not isinstance(items, list):
+        return preview_items
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+
+        title = clean_discovery_string(item.get("title"))
+        url = clean_discovery_string(item.get("url"))
+        if not title or not url:
+            continue
+
+        preview_items.append(
+            {
+                "title": title,
+                "url": url,
+                "published": clean_discovery_string(item.get("published")) or "",
+                "author": clean_discovery_string(item.get("author")) or "",
+                "badge": clean_discovery_string(item.get("badge")) or "",
+            }
+        )
+
+    return preview_items
+
+
+def normalize_discovery_feed(raw_feed: dict):
+    url = clean_discovery_string(raw_feed.get("url") or raw_feed.get("self_url"))
+    if not url:
+        return None
+
+    label = (
+        clean_discovery_string(raw_feed.get("label"))
+        or clean_discovery_string(raw_feed.get("title"))
+        or clean_discovery_string(raw_feed.get("site_name"))
+        or url
+    )
+    count = raw_feed.get("count")
+    if not isinstance(count, int):
+        count = (
+            raw_feed.get("item_count")
+            if isinstance(raw_feed.get("item_count"), int)
+            else None
+        )
+
+    score = raw_feed.get("score")
+    if not isinstance(score, (int, float)):
+        score = None
+
+    return {
+        "label": label,
+        "url": url,
+        "type": clean_discovery_string(raw_feed.get("type"))
+        or clean_discovery_string(raw_feed.get("version"))
+        or clean_discovery_string(raw_feed.get("content_type"))
+        or "feed",
+        "external": bool(raw_feed.get("external", True)),
+        "count": count,
+        "description": clean_discovery_string(raw_feed.get("description")),
+        "is_podcast": bool(raw_feed.get("is_podcast", False)),
+        "favicon": clean_discovery_string(raw_feed.get("favicon")),
+        "site_name": clean_discovery_string(raw_feed.get("site_name")),
+        "site_url": clean_discovery_string(raw_feed.get("site_url")),
+        "title": clean_discovery_string(raw_feed.get("title")),
+        "score": score,
+        "last_updated": clean_discovery_string(raw_feed.get("last_updated")),
+        "content_type": clean_discovery_string(raw_feed.get("content_type")),
+        "version": clean_discovery_string(raw_feed.get("version")),
+    }
+
+
+def deduplicate_discovery_feeds(raw_feeds):
+    unique_feeds = {}
+    for raw_feed in raw_feeds or []:
+        if not isinstance(raw_feed, dict):
+            continue
+
+        normalized_feed = normalize_discovery_feed(raw_feed)
+        if not normalized_feed:
+            continue
+
+        existing = unique_feeds.get(normalized_feed["url"])
+        if existing is None:
+            unique_feeds[normalized_feed["url"]] = normalized_feed
+            continue
+
+        existing_score = existing.get("score")
+        new_score = normalized_feed.get("score")
+        existing_count = existing.get("count") or -1
+        new_count = normalized_feed.get("count") or -1
+
+        if (new_score or -1) > (existing_score or -1) or (
+            new_score == existing_score and new_count > existing_count
+        ):
+            unique_feeds[normalized_feed["url"]] = normalized_feed
+
+    return sorted(
+        unique_feeds.values(),
+        key=lambda feed: (
+            -(feed.get("score") if feed.get("score") is not None else -1),
+            -(feed.get("count") if feed.get("count") is not None else -1),
+            (feed.get("label") or "").lower(),
+        ),
+    )
+
+
+def normalize_discovery_metadata(metadata, result_count: int):
+    cleaned_metadata = {}
+    if isinstance(metadata, dict):
+        cleaned_metadata = {
+            key: value for key, value in metadata.items() if key != "favicon_data_uri"
+        }
+    cleaned_metadata["result_count"] = result_count
+    return cleaned_metadata
+
+
+def normalize_resolved_discovery_response(mode: str, payload: dict):
+    feeds = deduplicate_discovery_feeds(payload.get("feeds") or [])
+    return {
+        "mode": mode,
+        "source": clean_discovery_string(payload.get("source")) or mode,
+        "input": clean_discovery_string(payload.get("input")) or "",
+        "entity_name": clean_discovery_string(payload.get("entity_name"))
+        or "Untitled source",
+        "entity_url": clean_discovery_string(payload.get("entity_url")),
+        "feeds": feeds,
+        "preview_items": normalize_discovery_preview_items(
+            payload.get("preview_items") or []
+        ),
+        "preview_feed_label": clean_discovery_string(payload.get("preview_feed_label")),
+        "attribution": normalize_discovery_attribution(payload.get("attribution")),
+        "metadata": normalize_discovery_metadata(payload.get("metadata"), len(feeds)),
+    }
+
+
+def normalize_feedsearch_discovery_response(
+    original_query: str, normalized_query: str, payload: dict
+):
+    feeds = deduplicate_discovery_feeds(payload.get("results") or [])
+    parsed_query = urlparse(normalized_query)
+    primary_feed = feeds[0] if feeds else {}
+
+    metadata = normalize_discovery_metadata(
+        {"query": payload.get("query") or normalized_query}, len(feeds)
+    )
+
+    return {
+        "mode": "website",
+        "source": "website",
+        "input": original_query,
+        "entity_name": primary_feed.get("site_name")
+        or primary_feed.get("title")
+        or parsed_query.hostname
+        or normalized_query,
+        "entity_url": primary_feed.get("site_url") or normalized_query,
+        "feeds": feeds,
+        "preview_items": [],
+        "preview_feed_label": None,
+        "attribution": normalize_discovery_attribution(payload.get("attribution")),
+        "metadata": metadata,
+    }
+
+
+async def fetch_discovery_service_payload(path: str, params: dict):
+    try:
+        async with httpx.AsyncClient(
+            timeout=Config.FEED_DISCOVERY_TIMEOUT_SECONDS,
+            follow_redirects=True,
+        ) as client:
+            response = await client.get(
+                f"{Config.FEED_DISCOVERY_API_BASE_URL}{path}", params=params
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="Feed discovery service timed out. Please try again.",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Feed discovery service is currently unavailable.",
+        ) from exc
+
+    if response.is_error:
+        detail = "Feed discovery request failed."
+        try:
+            error_payload = response.json()
+            if isinstance(error_payload, dict):
+                detail = (
+                    clean_discovery_string(error_payload.get("detail"))
+                    or clean_discovery_string(error_payload.get("error"))
+                    or detail
+                )
+        except ValueError:
+            pass
+
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Feed discovery service returned an invalid response.",
+        ) from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="Feed discovery service returned an unexpected response shape.",
+        )
+
+    return payload
 
 
 # --- Database Setup ---
@@ -1802,6 +2056,91 @@ async def feeds(
 
     finally:
         await database.release_db_connection(conn)
+
+
+@app.get("/api/discovery/search")
+async def discover_feeds(
+    request: Request,
+    query: str = Query(..., min_length=1, max_length=500),
+    mode: str = Query("smart"),
+    include_preview: bool = Query(True),
+    preview_limit: int = Query(4, ge=1, le=20),
+    reddit_limit: int = Query(10, ge=1, le=100),
+    feedsearch_info: bool = Query(True),
+    feedsearch_favicon: bool = Query(True),
+    feedsearch_skip_crawl: bool = Query(False),
+):
+    user = require_request_user(request)
+    resolved_mode = normalize_discovery_mode(mode)
+    if not resolved_mode:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid discovery mode. Use smart, website, youtube, or reddit.",
+        )
+
+    trimmed_query = query.strip()
+    if not trimmed_query:
+        raise HTTPException(status_code=400, detail="Query is required")
+
+    if resolved_mode == "website":
+        normalized_query = normalize_website_discovery_query(trimmed_query)
+        payload = await fetch_discovery_service_payload(
+            "/api/v1/feedsearch/search",
+            {
+                "url": normalized_query,
+                "info": feedsearch_info,
+                "favicon": feedsearch_favicon,
+                "skip_crawl": feedsearch_skip_crawl,
+            },
+        )
+        normalized_response = normalize_feedsearch_discovery_response(
+            trimmed_query, normalized_query, payload
+        )
+    elif resolved_mode == "youtube":
+        payload = await fetch_discovery_service_payload(
+            "/api/v1/youtube/resolve",
+            {
+                "query": trimmed_query,
+                "include_preview": include_preview,
+                "preview_limit": preview_limit,
+            },
+        )
+        normalized_response = normalize_resolved_discovery_response("youtube", payload)
+    elif resolved_mode == "reddit":
+        payload = await fetch_discovery_service_payload(
+            "/api/v1/reddit/resolve",
+            {
+                "query": trimmed_query,
+                "limit": reddit_limit,
+                "include_preview": include_preview,
+                "preview_limit": preview_limit,
+            },
+        )
+        normalized_response = normalize_resolved_discovery_response("reddit", payload)
+    else:
+        payload = await fetch_discovery_service_payload(
+            "/api/v1/resolve",
+            {
+                "query": trimmed_query,
+                "reddit_limit": reddit_limit,
+                "include_preview": include_preview,
+                "preview_limit": preview_limit,
+                "feedsearch_info": feedsearch_info,
+                "feedsearch_favicon": feedsearch_favicon,
+                "feedsearch_skip_crawl": feedsearch_skip_crawl,
+            },
+        )
+        normalized_response = normalize_resolved_discovery_response("smart", payload)
+
+    logging.info(
+        "[FeedDiscovery] user_id=%s mode=%s query=%s feeds=%s",
+        user["id"],
+        resolved_mode,
+        trimmed_query[:120],
+        len(normalized_response.get("feeds") or []),
+    )
+
+    return JSONResponse(normalized_response)
 
 
 @app.get("/api/timezones")

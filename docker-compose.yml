@@ -1,28 +1,24 @@
 services:
-  newsy-frontend:
+  newsy-app:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: Dockerfile.app
       target: production
     ports:
       - "3456:3456"
-    environment:
-      - NODE_ENV=production
-      - API_BASE_URL=http://newsy-backend:8765
-    restart: unless-stopped
-    networks:
-      - db-net
-    depends_on:
-      - newsy-backend
-
-  newsy-backend:
-    build:
-      context: .
-      dockerfile: dockerfile
-    ports:
-      - "8765:8765"
+      - "${FASTAPI_HOST_PORT:-8765}:8765"
+      - "${FEED_DISCOVERY_HOST_PORT:-3460}:3460"
     env_file:
       - .env
+    environment:
+      - NODE_ENV=production
+      - API_BASE_URL=http://127.0.0.1:8765
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - FEED_DISCOVERY_API_BASE_URL=http://127.0.0.1:3460
+      - FEED_DISCOVERY_TIMEOUT_SECONDS=${FEED_DISCOVERY_TIMEOUT_SECONDS:-20}
+      - RSS_GEN_CACHE_DIR=/tmp/rss-gen-cache
     volumes:
       - backup_data:/app/data/backups
       - reports_data:/app/reports
@@ -31,7 +27,6 @@ services:
       - db-net
     depends_on:
       - newsy_db
-      - newsy-redis
 
   go-scheduler:
     build:
@@ -45,7 +40,7 @@ services:
       - DB_USER=postgres
       - DB_PASSWORD=1122
       - DB_NAME=newsy
-      - PYTHON_BACKEND_URL=http://newsy-backend:8765
+      - PYTHON_BACKEND_URL=http://newsy-app:8765
       - WORKER_POOL_SIZE=100
       - POLLING_FREQUENCY=1m
       - BATCH_SIZE=100
@@ -59,7 +54,7 @@ services:
       - db-net
     depends_on:
       - newsy_db
-      - newsy-backend
+      - newsy-app
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8667/health"]
       interval: 30s
@@ -79,18 +74,8 @@ services:
       - db-net
     restart: unless-stopped
 
-  newsy-redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    networks:
-      - db-net
-    restart: unless-stopped
-
 volumes:
   postgres_data:
-  redis_data:
   backup_data:
   reports_data:
 

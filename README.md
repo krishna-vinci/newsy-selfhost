@@ -2,9 +2,25 @@
 
 **Stack:** SvelteKit, FastAPI, PostgreSQL, Redis, Go, Docker
 
+**Default Docker layout:** 3 containers — `newsy-app`, `go-scheduler`, and `newsy_db`
+
 **Core libraries:** OpenAI SDK, RapidFuzz, feedparser, readability-lxml
 
 Newsy is a self-hosted news app for people who follow many sources and want a clean, reliable way to stay updated. It brings feeds, categories, saved reading, reports, and notifications into one place, backed by a lightweight Go scheduler designed to handle large feed sets efficiently.
+
+## New: Feed Discovery
+
+Newsy can now discover feeds directly from the app using a bundled discovery service included in this repo.
+
+- Search **websites**, **YouTube**, and **Reddit** from one bar
+- Preview recent items before adding a source
+- Add discovered feeds into your existing categories in a few clicks
+
+<p align="center">
+  <img src="screenshots/feed-discovery.png" alt="Feed discovery" width="72%" />
+</p>
+
+<p align="center"><sub>Discover feeds from websites, YouTube channels, and subreddits without leaving Home.</sub></p>
 
 ## What it solves
 
@@ -15,6 +31,7 @@ Newsy gives you a practical workflow in one system. You add sources once, organi
 ## Features
 
 - **Multiple reading layouts**: switch between card, headline, and column views.
+- **Feed discovery from Home**: search websites, YouTube, and Reddit, preview results, and add feeds quickly.
 - **Category-based organization**: manage feeds and alerts by category.
 - **Unread, search, and saved queue**: keep track of what to read now and what to revisit later.
 - **Built-in reader for articles and videos**: read full content and watch embedded videos inside Newsy.
@@ -39,10 +56,15 @@ Newsy gives you a practical workflow in one system. You add sources once, organi
 </p>
 
 <p align="center">
+  <img src="screenshots/columnview.png" alt="Column reading view" width="48%" />
+  <img src="screenshots/settings-categoriespage.png" alt="Category settings" width="48%" />
+</p>
+
+<p align="center">
   <img src="screenshots/mobile-pwa.png" alt="Mobile PWA view" width="22%" />
 </p>
 
-<p align="center"><sub>Feed view, built-in reader, report scheduler, AI filtering, and mobile PWA.</sub></p>
+<p align="center"><sub>Feed view, built-in reader, report scheduler, AI filtering, column view, category management, and mobile PWA.</sub></p>
 
 ## Setup
 
@@ -91,6 +113,8 @@ PUBLIC_URL=https://your-domain.example
 CORS_ORIGINS=https://your-domain.example,http://localhost:3456,http://127.0.0.1:3456
 AUTH_SECRET_KEY=replace-me
 INTERNAL_API_KEY=replace-me
+FEED_DISCOVERY_API_BASE_URL=http://127.0.0.1:3460
+FEED_DISCOVERY_HOST_PORT=3460
 WEB_PUSH_VAPID_PUBLIC_KEY=replace-me-if-using-push
 WEB_PUSH_VAPID_PRIVATE_KEY=replace-me-if-using-push
 WEB_PUSH_SUBJECT=mailto:you@example.com
@@ -101,6 +125,8 @@ TELEGRAM_BOT_TOKEN=replace-me-if-using-telegram
 Notes:
 
 - `PUBLIC_URL` should match the URL users will actually open.
+- `FEED_DISCOVERY_API_BASE_URL` already points to the bundled feed discovery service running inside the main app container.
+- `FEED_DISCOVERY_HOST_PORT` controls the optional host port for opening the discovery service directly.
 - AI features are optional, but require an OpenAI-compatible API.
 - Telegram notifications are optional, but require a bot token.
 - On first run, create the initial admin account through the bootstrap flow.
@@ -147,13 +173,11 @@ Start the development stack with hot reload:
 docker compose -f docker-compose.dev.yml up --build
 ```
 
-This runs:
+This runs a 3-container stack:
 
-- frontend on `3456`
-- backend on `8765`
-- PostgreSQL
-- Redis
-- Go scheduler
+- `newsy-app` → frontend, backend, bundled feed discovery, and in-container Redis for cache/queue
+- `go-scheduler`
+- `newsy_db`
 
 The development setup is configured to work more easily on localhost without requiring HTTPS for auth cookies.
 
