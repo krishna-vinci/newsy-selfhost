@@ -24,7 +24,6 @@ from fastapi.responses import (
     FileResponse,
     StreamingResponse,
 )
-from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -67,8 +66,8 @@ from typing import List
 from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel
 
-from config import Config  # Import our centralized config
-from auth import (
+from backend.config import Config  # Import our centralized config
+from backend.auth import (
     router as auth_router,
     authenticate_request,
     is_admin_only_api_request,
@@ -76,25 +75,25 @@ from auth import (
     require_request_user,
     validate_internal_api_key,
 )
-import reports  # Import reports module
-import backup_restore  # Import backup/restore/export module
-import database  # Import database module
-import ai_filter  # Import AI filtering module
-import keyword_filter  # Import keyword/topic filtering module
-import cache  # Import cache module
-import internal_api  # Import internal API for Go scheduler
-import notifications
-from feed_ingestion import (
+from backend import reports  # Import reports module
+from backend import backup_restore  # Import backup/restore/export module
+from backend import database  # Import database module
+from backend import ai_filter  # Import AI filtering module
+from backend import keyword_filter  # Import keyword/topic filtering module
+from backend import cache  # Import cache module
+from backend import internal_api  # Import internal API for Go scheduler
+from backend import notifications
+from backend.feed_ingestion import (
     INITIAL_IMPORT_ENTRY_LIMIT,
     POLL_ENTRY_SCAN_LIMIT,
     get_entry_timestamp,
 )
-from timezone_catalog import (
+from backend.timezone_catalog import (
     DEFAULT_TIMEZONE,
     build_timezone_options,
     normalize_timezone,
 )
-from youtube_embed import convert_links_to_embeds
+from backend.youtube_embed import convert_links_to_embeds
 
 load_dotenv()  # Load environment variables
 
@@ -157,9 +156,9 @@ async def auth_guard(request: Request, call_next):
     return await call_next(request)
 
 
-templates = Jinja2Templates(directory="templates")
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 # Include auth router
 app.include_router(auth_router)
@@ -184,10 +183,6 @@ def truncate_words(text, max_words=100):
     if len(words) > max_words:
         return " ".join(words[:max_words]) + "..."
     return text
-
-
-# Register the filter with your Jinja2Templates
-templates.env.filters["truncate_words"] = truncate_words
 
 
 DISCOVERY_MODE_ALIASES = {
@@ -1451,7 +1446,7 @@ async def enqueue_due_feeds():
         logging.info(f"Found {len(due_feeds)} feeds due for refresh")
 
         # Import worker function
-        from worker import process_feed_job
+        from backend.worker import process_feed_job
 
         # Enqueue each due feed
         for feed in due_feeds:
@@ -3244,14 +3239,19 @@ async def feeds_column(request: Request):
     for category in categories:
         articles = await get_articles_for_category_db(user["id"], category, days=10)
         categories_list.append({"category": category, "feed_items": articles})
-    return templates.TemplateResponse(
-        "feeds-split.html", {"request": request, "categories": categories_list}
-    )
+    return JSONResponse({"categories": categories_list})
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 async def home(request: Request):
-    return templates.TemplateResponse("home.html", {"request": request})
+    return JSONResponse(
+        {
+            "name": "Newsy API",
+            "status": "ok",
+            "docs": "/docs",
+            "frontend": Config.PUBLIC_URL or "http://127.0.0.1:3456",
+        }
+    )
 
 
 # ===================== Keyword/Topic Filter Endpoints =====================

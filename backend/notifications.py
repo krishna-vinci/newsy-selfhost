@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 import httpx
 
-import database
-from auth import require_request_user
-from config import Config
+from backend import database
+from backend.auth import require_request_user
+from backend.config import Config
 
 try:
     from pywebpush import WebPushException, webpush

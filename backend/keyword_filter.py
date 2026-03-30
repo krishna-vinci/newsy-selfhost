@@ -10,9 +10,8 @@ import asyncio
 from typing import List, Dict, Any, Optional
 import asyncpg
 
-from ai_filter import filter_article
-import database
-import notifications
+from backend.ai_filter import filter_article
+from backend import database, notifications
 
 logger = logging.getLogger(__name__)
 

@@ -14,7 +14,7 @@ from datetime import datetime
 from openai import AsyncOpenAI
 import asyncpg
 
-from config import Config
+from backend.config import Config
 
 logger = logging.getLogger(__name__)
 

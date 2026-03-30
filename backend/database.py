@@ -9,7 +9,7 @@ from datetime import datetime
 import pytz
 import asyncpg
 
-from config import Config
+from backend.config import Config
 
 # Indian Standard Time
 IST = pytz.timezone("Asia/Kolkata")

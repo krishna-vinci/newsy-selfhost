@@ -19,9 +19,9 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-import database
-from config import Config
-from timezone_catalog import DEFAULT_TIMEZONE, normalize_timezone
+from backend import database
+from backend.config import Config
+from backend.timezone_catalog import DEFAULT_TIMEZONE, normalize_timezone
 
 logger = logging.getLogger(__name__)
 

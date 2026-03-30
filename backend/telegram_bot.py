@@ -19,7 +19,7 @@ load_dotenv()
 nest_asyncio.apply()
 
 # --- Configuration & Database Setup ---
-from config import Config  # Ensure Config has DB_*, TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, YOUR_SITE_URL, YOUR_SITE_NAME, etc.
+from backend.config import Config  # Ensure Config has DB_*, TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, YOUR_SITE_URL, YOUR_SITE_NAME, etc.
 
 # (If needed, you may define get_db_connection() here—but in our setup main.py has DB functions.)
 
@@ -56,7 +56,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # In your telegram_bot module, we assume the DB table exists.
-    from config import Config  # if needed for DB settings
+    from backend.config import Config  # if needed for DB settings
     # For simplicity, use a local DB connection (or import a shared function)
     try:
         # Here you can call your DB helper if available.
@@ -80,7 +80,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Subscription failed. Please try again later.")
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from config import Config
+    from backend.config import Config
     try:
         import psycopg2
         conn_str = f"dbname={Config.DB_NAME} user={Config.DB_USER} password={Config.DB_PASSWORD} host={Config.DB_HOST} port={Config.DB_PORT}"

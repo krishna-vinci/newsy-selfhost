@@ -11,9 +11,8 @@ from pydantic import BaseModel
 from typing import Optional
 import pytz
 
-from worker import parse_and_store_rss_feed
-import database
-import cache
+from backend.worker import parse_and_store_rss_feed
+from backend import database, cache
 
 IST = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger(__name__)
