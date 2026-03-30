@@ -18,9 +18,9 @@ from pydantic import BaseModel, Field
 import html2text
 import markdown2
 
-from config import Config
-from database import get_db_connection, release_db_connection
-from auth import require_request_user
+from backend.config import Config
+from backend.database import get_db_connection, release_db_connection
+from backend.auth import require_request_user
 
 # Indian Standard Time
 IST = pytz.timezone("Asia/Kolkata")

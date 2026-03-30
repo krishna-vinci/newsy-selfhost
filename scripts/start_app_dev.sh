@@ -12,10 +12,12 @@ cleanup() {
 
 trap cleanup SIGTERM SIGINT
 
+export PYTHONPATH=/app
+
 redis-server --bind 127.0.0.1 --appendonly no --save "" &
 REDIS_PID=$!
 
-fastapi dev main.py --host 0.0.0.0 --port 8765 &
+uvicorn backend.main:app --host 0.0.0.0 --port 8765 --reload &
 BACKEND_PID=$!
 
 uvicorn app:app --app-dir /app/rss-gen --host 0.0.0.0 --port 3460 --reload &

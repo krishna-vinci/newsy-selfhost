@@ -20,9 +20,9 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Request
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from auth import require_request_user
-from config import Config
-import database
+from backend.auth import require_request_user
+from backend.config import Config
+from backend import database
 
 # Backups directory
 BACKUPS_DIR = Path("data/backups")

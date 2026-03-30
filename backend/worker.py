@@ -17,14 +17,10 @@ from dotenv import load_dotenv
 import asyncpg
 import asyncio
 
-from config import Config
-import database
-import ai_filter
-import keyword_filter
-import cache
-from feed_ingestion import POLL_ENTRY_SCAN_LIMIT, get_entry_timestamp
-import notifications
-from youtube_embed import convert_links_to_embeds
+from backend.config import Config
+from backend import database, ai_filter, keyword_filter, cache, notifications
+from backend.feed_ingestion import POLL_ENTRY_SCAN_LIMIT, get_entry_timestamp
+from backend.youtube_embed import convert_links_to_embeds
 
 load_dotenv()
 

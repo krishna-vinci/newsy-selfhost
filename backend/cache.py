@@ -10,7 +10,7 @@ import json
 from threading import Lock
 from typing import Any, Optional, Dict, Callable
 from functools import wraps
-from config import Config
+from backend.config import Config
 
 # Cache storage: {cache_key: {"data": ..., "expires_at": timestamp}}
 _cache: Dict[str, Dict[str, Any]] = {}

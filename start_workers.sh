@@ -3,6 +3,7 @@
 
 WORKER_COUNT=${WORKER_COUNT:-4}
 REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}/${REDIS_DB}"
+export PYTHONPATH=/app
 
 echo "Starting ${WORKER_COUNT} RQ workers..."
 

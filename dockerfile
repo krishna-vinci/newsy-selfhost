@@ -26,4 +26,4 @@ RUN chmod +x /app/start_workers.sh
 EXPOSE 8765
 
 # Run your FastAPI app with Uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8765"]
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8765"]
