@@ -25,7 +25,7 @@ DISCOVERY_PID=$!
 
 (
 	cd /app/frontend
-	node build
+	PORT=3456 node build
 ) &
 FRONTEND_PID=$!
 
