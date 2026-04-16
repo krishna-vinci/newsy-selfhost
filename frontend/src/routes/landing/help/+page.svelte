@@ -112,7 +112,7 @@
 					<h3 class="text-base font-semibold">Contributing</h3>
 				</div>
 				<p class="mb-4 text-sm leading-relaxed text-muted-foreground">
-					Newsy is open source under the MIT license. Contributions, bug reports, and feature requests are welcome.
+					Newsy is open source under the Apache 2.0 license. Contributions, bug reports, and feature requests are welcome.
 				</p>
 				<Button
 					href="https://github.com/krishna-vinci/newsy-selfhost"

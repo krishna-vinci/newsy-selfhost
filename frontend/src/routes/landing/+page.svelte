@@ -142,7 +142,7 @@
 		{ value: '6', label: 'Services' },
 		{ value: 'SSE', label: 'Real-time' },
 		{ value: '∞', label: 'Self-hosted' },
-		{ value: 'MIT', label: 'License' }
+		{ value: 'Apache 2.0', label: 'License' }
 	];
 </script>
 
@@ -517,7 +517,7 @@
 				<div class="flex items-center gap-4 text-xs text-muted-foreground/60">
 					<a href="/landing/help" class="transition-colors hover:text-muted-foreground">Help</a>
 					<a href="https://github.com/krishna-vinci/newsy-selfhost" target="_blank" rel="noreferrer" class="transition-colors hover:text-muted-foreground">GitHub</a>
-					<span>MIT License</span>
+					<span>Apache 2.0 License</span>
 				</div>
 			</div>
 		</footer>
