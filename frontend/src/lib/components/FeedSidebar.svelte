@@ -14,8 +14,10 @@
 	import TimezonePicker from '$lib/components/TimezonePicker.svelte';
 	import {
 		ChevronDown,
+		Copy,
 		Plus,
 		Loader2,
+		KeyRound,
 		Pencil,
 		Trash2,
 		Settings,
@@ -62,7 +64,7 @@
 		total_count?: number;
 	};
 
-	type NotificationPreferences = {
+		type NotificationPreferences = {
 		telegram: {
 			available: boolean;
 			enabled: boolean;
@@ -75,6 +77,33 @@
 			subscription_count: number;
 			public_key: string | null;
 		};
+	};
+
+	type ExternalApiConfig = {
+		enabled: boolean;
+		sse_enabled: boolean;
+		public_base_url: string | null;
+		endpoints: {
+			categories: string;
+			feeds: string;
+			articles: string;
+			article_detail: string;
+			stream: string;
+		};
+		auth: {
+			scheme: string;
+			token_prefix: string;
+			note: string;
+		};
+	};
+
+	type ApiToken = {
+		id: number;
+		name: string;
+		created_at: string;
+		last_used_at: string | null;
+		expires_at: string | null;
+		revoked_at: string | null;
 	};
 
 	type FeedConfig = Record<string, Feed[]>;
@@ -141,6 +170,16 @@
 	let isSendingTelegramTest = $state(false);
 	let isUpdatingBrowserPush = $state(false);
 	let browserPushSupportMessage = $state<string | null>(null);
+	let externalApiConfig = $state<ExternalApiConfig | null>(null);
+	let isLoadingExternalApiConfig = $state(false);
+	let isSavingExternalApiConfig = $state(false);
+	let apiTokens = $state<ApiToken[]>([]);
+	let isLoadingApiTokens = $state(false);
+	let isCreatingApiToken = $state(false);
+	let apiTokenName = $state('');
+	let apiTokenExpiryDays = $state('365');
+	let latestCreatedApiToken = $state<string | null>(null);
+	let latestCreatedApiTokenName = $state<string | null>(null);
 
 	// Backup & Export state
 	let backups = $state<any[]>([]);
@@ -433,6 +472,8 @@
 	function openCategorySettings() {
 		loadCategories();
 		loadNotificationPreferences();
+		loadExternalApiConfig();
+		loadApiTokens();
 		if ($page.data.auth?.isAdmin) {
 			loadBackups(); // Load backups when opening settings
 		}
@@ -441,6 +482,8 @@
 	}
 
 	function closeCategorySettings() {
+		latestCreatedApiToken = null;
+		latestCreatedApiTokenName = null;
 		showCategorySettingsModal = false;
 	}
 
@@ -535,6 +578,167 @@
 			telegramChatId = payload.telegram.chat_id || '';
 		} catch (error) {
 			console.error('Error loading notification preferences:', error);
+		}
+	}
+
+	async function loadExternalApiConfig() {
+		isLoadingExternalApiConfig = true;
+		try {
+			const response = await fetch('/api/external/config');
+			if (!response.ok) {
+				throw new Error('Failed to load external API settings');
+			}
+
+			externalApiConfig = await response.json();
+		} catch (error) {
+			console.error('Error loading external API settings:', error);
+			toast.error('Failed to load API settings');
+		} finally {
+			isLoadingExternalApiConfig = false;
+		}
+	}
+
+	async function saveExternalApiConfig() {
+		if (!externalApiConfig) return;
+
+		isSavingExternalApiConfig = true;
+		try {
+			const response = await fetch('/api/external/config', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					enabled: externalApiConfig.enabled,
+					sse_enabled: externalApiConfig.sse_enabled
+				})
+			});
+
+			if (!response.ok) {
+				const error = await response.json().catch(() => null);
+				throw new Error(error?.detail || 'Failed to save API settings');
+			}
+
+			externalApiConfig = await response.json();
+			toast.success('API settings saved');
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Failed to save API settings');
+			await loadExternalApiConfig();
+		} finally {
+			isSavingExternalApiConfig = false;
+		}
+	}
+
+	async function loadApiTokens() {
+		isLoadingApiTokens = true;
+		try {
+			const response = await fetch('/api/auth/api-tokens');
+			if (!response.ok) {
+				throw new Error('Failed to load API tokens');
+			}
+
+			apiTokens = await response.json();
+		} catch (error) {
+			console.error('Error loading API tokens:', error);
+			toast.error('Failed to load API tokens');
+		} finally {
+			isLoadingApiTokens = false;
+		}
+	}
+
+	async function createApiToken() {
+		if (!apiTokenName.trim()) {
+			toast.error('Enter a token name first');
+			return;
+		}
+
+		const trimmedExpiry = apiTokenExpiryDays.trim();
+		const expiresInDays = trimmedExpiry ? Number.parseInt(trimmedExpiry, 10) : null;
+		if (
+			trimmedExpiry &&
+			(expiresInDays === null || Number.isNaN(expiresInDays) || expiresInDays <= 0)
+		) {
+			toast.error('Expiry must be a positive number of days');
+			return;
+		}
+
+		isCreatingApiToken = true;
+		try {
+			const response = await fetch('/api/auth/api-tokens', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					name: apiTokenName.trim(),
+					expires_in_days: expiresInDays || undefined
+				})
+			});
+
+			const payload = await response.json().catch(() => null);
+			if (!response.ok) {
+				throw new Error(payload?.detail || 'Failed to create API token');
+			}
+
+			latestCreatedApiToken = payload.token || null;
+			latestCreatedApiTokenName = payload.name || apiTokenName.trim();
+			apiTokenName = '';
+			await loadApiTokens();
+			toast.success('API token created');
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Failed to create API token');
+		} finally {
+			isCreatingApiToken = false;
+		}
+	}
+
+	async function revokeApiToken(tokenId: number) {
+		if (!confirm('Revoke this API token? Connected applications using it will stop working.')) {
+			return;
+		}
+
+		try {
+			const response = await fetch(`/api/auth/api-tokens/${tokenId}`, {
+				method: 'DELETE'
+			});
+			if (!response.ok) {
+				const error = await response.json().catch(() => null);
+				throw new Error(error?.detail || 'Failed to revoke API token');
+			}
+
+			apiTokens = apiTokens.filter((token) => token.id !== tokenId);
+			toast.success('API token revoked');
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Failed to revoke API token');
+		}
+	}
+
+	function getExternalApiBaseUrl(): string {
+		if (externalApiConfig?.public_base_url) {
+			return externalApiConfig.public_base_url;
+		}
+
+		if (typeof window !== 'undefined') {
+			return window.location.origin;
+		}
+
+		return '';
+	}
+
+	function getExternalEndpointUrl(path: string): string {
+		const baseUrl = getExternalApiBaseUrl();
+		return baseUrl ? `${baseUrl}${path}` : path;
+	}
+
+	function formatDateTime(value: string | null): string {
+		if (!value) return 'Never';
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) return value;
+		return date.toLocaleString();
+	}
+
+	async function copyToClipboard(text: string, successMessage: string) {
+		try {
+			await navigator.clipboard.writeText(text);
+			toast.success(successMessage);
+		} catch (error) {
+			toast.error('Failed to copy to clipboard');
 		}
 	}
 
@@ -1602,7 +1806,16 @@
 </Dialog.Root>
 
 <!-- Category Settings Modal -->
-<Dialog.Root open={showCategorySettingsModal} onOpenChange={(o) => (showCategorySettingsModal = o)}>
+<Dialog.Root
+	open={showCategorySettingsModal}
+	onOpenChange={(open) => {
+		if (open) {
+			showCategorySettingsModal = true;
+		} else {
+			closeCategorySettings();
+		}
+	}}
+>
 	<Dialog.Content
 		class="h-[100dvh] max-h-[100dvh] w-[100vw] max-w-[100vw] overflow-hidden rounded-none p-0 sm:h-[90vh] sm:max-h-[90vh] sm:w-full sm:max-w-2xl sm:rounded-lg lg:max-w-4xl xl:max-w-5xl"
 	>
@@ -1614,9 +1827,9 @@
 				</p>
 			</div>
 			<Tabs.Root bind:value={activeTab} class="flex min-h-0 flex-1 flex-col">
-				<Tabs.List
-					class="-mx-0 flex h-auto w-full snap-x snap-mandatory justify-start gap-2 overflow-x-auto rounded-none border-b bg-transparent px-4 py-3 sm:mx-6 sm:mt-4 sm:grid sm:grid-cols-5 sm:gap-0 sm:overflow-visible sm:rounded-lg sm:border-0 sm:bg-muted sm:p-[3px]"
-				>
+			<Tabs.List
+				class="-mx-0 flex h-auto w-full snap-x snap-mandatory justify-start gap-2 overflow-x-auto rounded-none border-b bg-transparent px-4 py-3 sm:mx-6 sm:mt-4 sm:grid sm:grid-cols-6 sm:gap-0 sm:overflow-visible sm:rounded-lg sm:border-0 sm:bg-muted sm:p-[3px]"
+			>
 					<Tabs.Trigger
 						value="categories"
 						class="h-9 min-w-max shrink-0 snap-start px-3 text-xs sm:text-sm"
@@ -1640,6 +1853,12 @@
 						value="notifications"
 						class="h-9 min-w-max shrink-0 snap-start px-3 text-xs sm:text-sm"
 						><span class="sm:hidden">Alerts</span><span class="hidden sm:inline">Notifications</span
+						></Tabs.Trigger
+					>
+					<Tabs.Trigger
+						value="api"
+						class="h-9 min-w-max shrink-0 snap-start px-3 text-xs sm:text-sm"
+						><span class="sm:hidden">API</span><span class="hidden sm:inline">External API</span
 						></Tabs.Trigger
 					>
 					<Tabs.Trigger
@@ -2142,6 +2361,217 @@
 								</p>
 							{/if}
 						</div>
+					</div>
+				</Tabs.Content>
+				<Tabs.Content value="api" class="mt-0 min-h-0 flex-1 overflow-y-auto">
+					<div class="space-y-4 p-4 sm:p-5">
+						{#if isLoadingExternalApiConfig && !externalApiConfig}
+							<div class="flex items-center justify-center py-12 text-sm text-muted-foreground">
+								<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+								Loading API settings…
+							</div>
+						{:else if externalApiConfig}
+							<div class="rounded-lg border bg-background p-3 sm:p-4">
+								<div
+									class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between sm:gap-4"
+								>
+									<div>
+										<h4 class="text-sm font-semibold">Dedicated external API</h4>
+										<p class="mt-1 text-xs text-muted-foreground">
+											Expose your feeds to other applications over REST and SSE using API tokens.
+										</p>
+									</div>
+									<Switch.Switch
+										checked={externalApiConfig.enabled}
+										onCheckedChange={(checked) => {
+											if (!externalApiConfig) return;
+											externalApiConfig = {
+												enabled: checked,
+												sse_enabled: checked ? externalApiConfig.sse_enabled : false,
+												public_base_url: externalApiConfig.public_base_url,
+												endpoints: externalApiConfig.endpoints,
+												auth: externalApiConfig.auth
+											};
+										}}
+									/>
+								</div>
+
+								<div class="space-y-3">
+									<div class="rounded-md border p-3">
+										<div class="flex items-center justify-between gap-3">
+											<div>
+												<p class="text-sm font-medium">Server-Sent Events</p>
+												<p class="mt-1 text-xs text-muted-foreground">
+													Use the stream endpoint for new article and notification events.
+												</p>
+											</div>
+											<Switch.Switch
+												checked={externalApiConfig.sse_enabled}
+												disabled={!externalApiConfig.enabled}
+												onCheckedChange={(checked) => {
+													if (!externalApiConfig) return;
+													externalApiConfig = {
+														enabled: externalApiConfig.enabled,
+														sse_enabled: checked,
+														public_base_url: externalApiConfig.public_base_url,
+														endpoints: externalApiConfig.endpoints,
+														auth: externalApiConfig.auth
+													};
+												}}
+											/>
+										</div>
+									</div>
+
+									<div class="flex flex-wrap gap-2">
+										<Button onclick={saveExternalApiConfig} disabled={isSavingExternalApiConfig}>
+											{#if isSavingExternalApiConfig}
+												<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+											{/if}
+											Save API settings
+										</Button>
+										{#if !externalApiConfig.enabled}
+											<p class="self-center text-xs text-muted-foreground">
+												External clients cannot access the dedicated API until it is enabled.
+											</p>
+										{/if}
+									</div>
+								</div>
+							</div>
+
+							<div class="rounded-lg border bg-background p-3 sm:p-4">
+								<div class="mb-3">
+									<h4 class="text-sm font-semibold">Connection details</h4>
+									<p class="mt-1 text-xs text-muted-foreground">
+										Use these endpoints from scripts, bots, or trading systems. The stream endpoint uses
+										SSE and still requires a Bearer token header.
+									</p>
+								</div>
+
+								<div class="space-y-2 text-xs text-muted-foreground">
+									<p><strong>Base URL:</strong> {getExternalApiBaseUrl() || 'Set PUBLIC_URL or use the current site origin.'}</p>
+									<p><strong>REST:</strong> {getExternalEndpointUrl(externalApiConfig.endpoints.articles)}</p>
+									<p><strong>SSE:</strong> {getExternalEndpointUrl(externalApiConfig.endpoints.stream)}</p>
+								</div>
+
+								<div class="mt-4 grid gap-3 lg:grid-cols-2">
+									<div>
+										<p class="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+											Fetch articles
+										</p>
+										<pre class="overflow-x-auto rounded-md bg-muted p-3 text-xs">{`curl -H "Authorization: Bearer <token>" "${getExternalEndpointUrl(externalApiConfig.endpoints.articles)}?limit=25"`}</pre>
+									</div>
+									<div>
+										<p class="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+											Open SSE stream
+										</p>
+										<pre class="overflow-x-auto rounded-md bg-muted p-3 text-xs">{`curl -N -H "Authorization: Bearer <token>" "${getExternalEndpointUrl(externalApiConfig.endpoints.stream)}"`}</pre>
+									</div>
+								</div>
+							</div>
+
+							<div class="rounded-lg border bg-background p-3 sm:p-4">
+								<div class="mb-4 flex items-start gap-3">
+									<KeyRound class="mt-0.5 h-4 w-4 text-muted-foreground" />
+									<div>
+										<h4 class="text-sm font-semibold">API tokens</h4>
+										<p class="mt-1 text-xs text-muted-foreground">
+											Generate a token for each external application. Tokens are shown only once when
+											created.
+										</p>
+									</div>
+								</div>
+
+								<div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_160px_auto]">
+									<div class="space-y-1.5">
+										<label for="api-token-name" class="text-sm font-medium">Token name</label>
+										<Input
+											id="api-token-name"
+											bind:value={apiTokenName}
+											placeholder="e.g. trading-bot-prod"
+										/>
+									</div>
+									<div class="space-y-1.5">
+										<label for="api-token-expiry" class="text-sm font-medium">Expiry days</label>
+										<Input
+											id="api-token-expiry"
+											type="number"
+											min="1"
+											bind:value={apiTokenExpiryDays}
+											placeholder="365"
+										/>
+									</div>
+									<div class="sm:self-end">
+										<Button onclick={createApiToken} disabled={isCreatingApiToken} class="w-full sm:w-auto">
+											{#if isCreatingApiToken}
+												<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+											{/if}
+											Generate token
+										</Button>
+									</div>
+								</div>
+
+								{#if latestCreatedApiToken}
+									<div class="mt-4 rounded-md border border-green-500/30 bg-green-500/10 p-3">
+										<p class="text-sm font-medium">Copy your new token now</p>
+										<p class="mt-1 text-xs text-muted-foreground">
+											{latestCreatedApiTokenName || 'New token'} will not be shown again after you close this dialog.
+										</p>
+										<div class="mt-3 flex flex-col gap-2 sm:flex-row">
+											<Input value={latestCreatedApiToken} readonly class="font-mono text-xs" />
+											<Button
+												variant="outline"
+												onclick={() => copyToClipboard(latestCreatedApiToken || '', 'API token copied')}
+											>
+												<Copy class="mr-2 h-4 w-4" />
+												Copy
+											</Button>
+										</div>
+									</div>
+								{/if}
+
+								<div class="mt-4 space-y-2">
+									{#if isLoadingApiTokens}
+										<div class="flex items-center justify-center py-8 text-sm text-muted-foreground">
+											<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+											Loading tokens…
+										</div>
+									{:else if !apiTokens.length}
+										<div class="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+											No API tokens yet.
+										</div>
+									{:else}
+										{#each apiTokens as token (token.id)}
+											<div class="rounded-md border p-3">
+												<div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+													<div class="min-w-0 flex-1">
+														<p class="truncate text-sm font-medium">{token.name}</p>
+														<p class="mt-1 text-xs text-muted-foreground">
+															Created {formatDateTime(token.created_at)}
+															{#if token.last_used_at}
+																• Last used {formatDateTime(token.last_used_at)}
+															{/if}
+															{#if token.expires_at}
+																• Expires {formatDateTime(token.expires_at)}
+															{/if}
+															{#if token.revoked_at}
+																• Revoked {formatDateTime(token.revoked_at)}
+															{/if}
+														</p>
+													</div>
+													<Button variant="outline" size="sm" onclick={() => revokeApiToken(token.id)}>
+														Revoke
+													</Button>
+												</div>
+											</div>
+										{/each}
+									{/if}
+								</div>
+							</div>
+						{:else}
+							<div class="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+								Unable to load API settings.
+							</div>
+						{/if}
 					</div>
 				</Tabs.Content>
 				<Tabs.Content value="backup" class="mt-0 min-h-0 flex-1 overflow-y-auto">

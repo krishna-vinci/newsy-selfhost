@@ -199,6 +199,29 @@ async def init_db():
         """)
         logger.info("Refresh sessions table initialized")
 
+        # Personal API tokens for external applications
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_tokens (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_used_at TIMESTAMPTZ,
+                expires_at TIMESTAMPTZ,
+                revoked_at TIMESTAMPTZ
+            );
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_api_tokens_user_id
+            ON api_tokens (user_id, created_at DESC);
+            """
+        )
+        logger.info("API tokens table initialized")
+
         # OAuth/identity extension point for future providers
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS auth_identities (
@@ -226,6 +249,20 @@ async def init_db():
             );
         """)
         logger.info("User preferences table initialized")
+
+        # Dedicated external API settings per user
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_external_api_settings (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                is_enabled BOOLEAN NOT NULL DEFAULT false,
+                sse_enabled BOOLEAN NOT NULL DEFAULT true,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+        logger.info("External API settings table initialized")
 
         # User-owned notification/integration configuration
         await conn.execute(

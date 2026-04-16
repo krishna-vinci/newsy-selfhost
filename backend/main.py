@@ -83,6 +83,7 @@ from backend import keyword_filter  # Import keyword/topic filtering module
 from backend import cache  # Import cache module
 from backend import internal_api  # Import internal API for Go scheduler
 from backend import notifications
+from backend import external_api
 from backend.feed_ingestion import (
     INITIAL_IMPORT_ENTRY_LIMIT,
     POLL_ENTRY_SCAN_LIMIT,
@@ -150,6 +151,15 @@ async def auth_guard(request: Request, call_next):
 
     request.state.user = user
 
+    if (
+        getattr(request.state, "auth_method", None) == "api_token"
+        and not path.startswith("/api/external")
+    ):
+        return JSONResponse(
+            {"detail": "API tokens can only access dedicated external API endpoints"},
+            status_code=403,
+        )
+
     if is_admin_only_api_request(path, request.method) and user["role"] != "admin":
         return JSONResponse({"detail": "Admin access required"}, status_code=403)
 
@@ -174,6 +184,9 @@ app.include_router(internal_api.router)
 
 # Include notifications router
 app.include_router(notifications.router)
+
+# Include dedicated external API router
+app.include_router(external_api.router)
 
 
 def truncate_words(text, max_words=100):

@@ -16,9 +16,11 @@
 
 	let { children, data } = $props();
 	const authPagePaths = ['/login', '/signup', '/bootstrap'];
+	const isLandingRoute = $derived($page.url.pathname.startsWith('/landing'));
 	const isAppShellRoute = $derived.by(
 		() => data.auth.isAuthenticated && !authPagePaths.includes($page.url.pathname)
 	);
+	const hideMarketingAuthActions = $derived(isLandingRoute);
 
 	onMount(() => {
 		if (window.isSecureContext && 'serviceWorker' in navigator) {
@@ -34,6 +36,7 @@
 <AuthDialog allowPublicSignup={data.auth.allowPublicSignup} />
 
 <div class="flex h-screen flex-col">
+	{#if !isLandingRoute}
 	<header class="flex-shrink-0 border-b px-4 py-2 sm:px-6 sm:py-3">
 		<div class="flex flex-wrap items-center justify-between gap-3 md:flex-nowrap">
 			<div class="flex items-center gap-3 md:flex-1">
@@ -52,7 +55,7 @@
 				{#if data.auth.isAuthenticated}
 					<NotificationBell />
 				{/if}
-				{#if !data.auth.isAuthenticated && !data.auth.bootstrapRequired && !['/login', '/signup', '/bootstrap'].includes($page.url.pathname)}
+				{#if !data.auth.isAuthenticated && !data.auth.bootstrapRequired && !['/login', '/signup', '/bootstrap'].includes($page.url.pathname) && !hideMarketingAuthActions}
 					<Button
 						variant="outline"
 						class="flex-1 sm:flex-none"
@@ -78,6 +81,7 @@
 			</div>
 		</div>
 	</header>
+	{/if}
 
 	<div class="relative flex-1 overflow-hidden">
 		{@render children?.()}
