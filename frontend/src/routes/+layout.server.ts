@@ -1,7 +1,7 @@
 import { redirect } from '@sveltejs/kit';
 import type { RequestEvent } from '@sveltejs/kit';
 
-const PUBLIC_PATHS = new Set(['/login', '/signup', '/bootstrap']);
+const PUBLIC_PATHS = new Set(['/login', '/signup', '/bootstrap', '/landing', '/landing/help', '/landing/api-doc']);
 
 export const load = async ({ fetch, url }: RequestEvent) => {
 	const configResponse = await fetch('/api/auth/config');

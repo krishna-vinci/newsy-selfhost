@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytz
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Path, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -71,6 +71,27 @@ class SignInRequest(BaseModel):
     password: str = Field(..., min_length=1, max_length=128)
 
 
+class ApiTokenCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+    def normalized_name(self) -> str:
+        return self.name.strip()
+
+
+class ApiTokenResponse(BaseModel):
+    id: int
+    name: str
+    created_at: str
+    last_used_at: str | None = None
+    expires_at: str | None = None
+    revoked_at: str | None = None
+
+
+class ApiTokenCreateResponse(ApiTokenResponse):
+    token: str
+
+
 class ExpiredTokenError(Exception):
     pass
 
@@ -93,6 +114,10 @@ def _get_secret_bytes() -> bytes:
 
 
 def _hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _hash_api_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
@@ -252,6 +277,17 @@ def _serialize_user(row: Any) -> dict[str, Any]:
         if row["last_login_at"]
         else None,
     }
+
+
+def _serialize_api_token(row: Any) -> ApiTokenResponse:
+    return ApiTokenResponse(
+        id=row["id"],
+        name=row["name"],
+        created_at=row["created_at"].isoformat(),
+        last_used_at=row["last_used_at"].isoformat() if row["last_used_at"] else None,
+        expires_at=row["expires_at"].isoformat() if row["expires_at"] else None,
+        revoked_at=row["revoked_at"].isoformat() if row["revoked_at"] else None,
+    )
 
 
 def _get_request_ip(request: Request) -> str | None:
@@ -446,15 +482,37 @@ def _is_session_active(session_row: Any) -> bool:
     )
 
 
-async def authenticate_request(request: Request) -> dict[str, Any] | None:
-    token = None
+async def authenticate_request(
+    request: Request, *, touch_api_token_last_used: bool = True
+) -> dict[str, Any] | None:
     authorization = request.headers.get("authorization")
+    bearer_token = None
     if authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1].strip()
+        bearer_token = authorization.split(" ", 1)[1].strip()
 
-    token = token or request.cookies.get(Config.AUTH_ACCESS_COOKIE_NAME)
+    if bearer_token:
+        user = await _authenticate_access_token(bearer_token)
+        if user:
+            request.state.auth_method = "access_token"
+            return user
+        user = await _authenticate_api_token(
+            bearer_token, touch_last_used=touch_api_token_last_used
+        )
+        if user:
+            request.state.auth_method = "api_token"
+        return user
+
+    token = request.cookies.get(Config.AUTH_ACCESS_COOKIE_NAME)
     if not token:
         return None
+
+    user = await _authenticate_access_token(token)
+    if user:
+        request.state.auth_method = "session_cookie"
+    return user
+
+
+async def _authenticate_access_token(token: str) -> dict[str, Any] | None:
 
     try:
         payload = _decode_access_token(token)
@@ -490,11 +548,54 @@ async def authenticate_request(request: Request) -> dict[str, Any] | None:
         await database.release_db_connection(conn)
 
 
+async def _authenticate_api_token(
+    token: str, *, touch_last_used: bool = True
+) -> dict[str, Any] | None:
+    conn = await database.get_db_connection()
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT u.id, u.username, u.email, u.role, u.is_active, u.created_at, u.last_login_at,
+                   at.id AS api_token_id, at.expires_at, at.revoked_at
+            FROM api_tokens at
+            JOIN users u ON u.id = at.user_id
+            WHERE at.token_hash = $1
+            LIMIT 1
+            """,
+            _hash_api_token(token),
+        )
+        if not row or not row["is_active"]:
+            return None
+        if row["revoked_at"] is not None:
+            return None
+        if row["expires_at"] is not None and row["expires_at"] <= _utcnow():
+            return None
+
+        if touch_last_used:
+            await conn.execute(
+                "UPDATE api_tokens SET last_used_at = NOW() WHERE id = $1",
+                row["api_token_id"],
+            )
+        return _serialize_user(row)
+    finally:
+        await database.release_db_connection(conn)
+
+
 def require_request_user(request: Request) -> dict[str, Any]:
     user = getattr(request.state, "user", None)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
+        )
+    return user
+
+
+def require_session_user(request: Request) -> dict[str, Any]:
+    user = require_request_user(request)
+    if getattr(request.state, "auth_method", None) == "api_token":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API tokens cannot manage other API tokens",
         )
     return user
 
@@ -730,6 +831,98 @@ async def sign_out(request: Request) -> JSONResponse:
     clear_auth_cookies(response)
     _set_no_store_headers(response)
     return response
+
+
+@router.get("/api/auth/api-tokens", response_model=list[ApiTokenResponse])
+async def list_api_tokens(request: Request) -> JSONResponse:
+    user = require_session_user(request)
+    conn = await database.get_db_connection()
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT id, name, created_at, last_used_at, expires_at, revoked_at
+            FROM api_tokens
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            """,
+            user["id"],
+        )
+        response = JSONResponse(
+            [_serialize_api_token(row).model_dump() for row in rows]
+        )
+        _set_no_store_headers(response)
+        return response
+    finally:
+        await database.release_db_connection(conn)
+
+
+@router.post("/api/auth/api-tokens", response_model=ApiTokenCreateResponse)
+async def create_api_token(
+    payload: ApiTokenCreateRequest, request: Request
+) -> JSONResponse:
+    user = require_session_user(request)
+    token_name = payload.normalized_name()
+    if not token_name:
+        raise HTTPException(status_code=400, detail="API token name is required")
+
+    token = f"nsy_{secrets.token_urlsafe(32)}"
+    expires_at = (
+        _utcnow() + timedelta(days=payload.expires_in_days)
+        if payload.expires_in_days is not None
+        else None
+    )
+
+    conn = await database.get_db_connection()
+    try:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO api_tokens (user_id, name, token_hash, expires_at)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, name, created_at, last_used_at, expires_at, revoked_at
+            """,
+            user["id"],
+            token_name,
+            _hash_api_token(token),
+            expires_at,
+        )
+        response = JSONResponse(
+            ApiTokenCreateResponse(
+                **_serialize_api_token(row).model_dump(), token=token
+            ).model_dump()
+        )
+        _set_no_store_headers(response)
+        return response
+    finally:
+        await database.release_db_connection(conn)
+
+
+@router.delete("/api/auth/api-tokens/{token_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_api_token(request: Request, token_id: int = Path(..., ge=1)) -> Response:
+    user = require_session_user(request)
+    conn = await database.get_db_connection()
+    try:
+        result = await conn.execute(
+            """
+            UPDATE api_tokens
+            SET revoked_at = NOW()
+            WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+            """,
+            token_id,
+            user["id"],
+        )
+        updated_count = int(result.split()[-1]) if result else 0
+        if updated_count == 0:
+            existing = await conn.fetchval(
+                "SELECT 1 FROM api_tokens WHERE id = $1 AND user_id = $2",
+                token_id,
+                user["id"],
+            )
+            if not existing:
+                raise HTTPException(status_code=404, detail="API token not found")
+
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    finally:
+        await database.release_db_connection(conn)
 
 
 @router.get("/api/auth/me")

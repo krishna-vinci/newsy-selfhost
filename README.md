@@ -8,6 +8,17 @@
 
 Newsy is a self-hosted news app for people who follow many sources and want a clean, reliable way to stay updated. It brings feeds, categories, saved reading, reports, and notifications into one place, backed by a lightweight Go scheduler designed to handle large feed sets efficiently.
 
+## New: External API and SSE
+
+Newsy now includes a dedicated external API for other applications, plus live SSE streaming for near-real-time integrations.
+
+- Generate personal API tokens from **Settings → API**
+- Query feeds, categories, and articles from `/api/external/*`
+- Stream live updates with `/api/external/stream`
+- Trigger on-demand full-content extraction for selected articles
+
+See [docs/external-api.md](docs/external-api.md) for usage, response shapes, and integration examples.
+
 ## New: Feed Discovery
 
 Newsy can now discover feeds directly from the app using a bundled discovery service included in this repo.
@@ -31,6 +42,7 @@ Newsy gives you a practical workflow in one system. You add sources once, organi
 ## Features
 
 - **Multiple reading layouts**: switch between card, headline, and column views.
+- **Dedicated external API**: expose categories, feeds, articles, and a live SSE stream to external systems using personal API tokens.
 - **Feed discovery from Home**: search websites, YouTube, and Reddit, preview results, and add feeds quickly.
 - **Category-based organization**: manage feeds and alerts by category.
 - **Unread, search, and saved queue**: keep track of what to read now and what to revisit later.
@@ -180,6 +192,18 @@ This runs a 3-container stack:
 - `newsy_db`
 
 The development setup is configured to work more easily on localhost without requiring HTTPS for auth cookies.
+
+## External API
+
+Newsy includes a dedicated read-oriented external API under `/api/external` plus an SSE stream for incremental updates.
+
+- Enable it from **Settings → API**
+- Generate a personal API token in the same UI
+- Use the token as `Authorization: Bearer <token>`
+
+See [docs/external-api.md](docs/external-api.md) for usage, examples, and integration patterns.
+
+A ready-to-run Python client example is available at [examples/python_external_api_client.py](examples/python_external_api_client.py).
 
 ## Contributing
 
