@@ -17,16 +17,17 @@ type Options struct {
 
 	// Python Backend
 	PythonBackendURL string
+	InternalAPIKey   string
 
 	// Worker Pool
 	WorkerPoolSize int
 
 	// Scheduling
-	PollingFrequency      time.Duration
-	BatchSize             int
-	PollingErrorLimit     int
-	PollingLimitPerHost   int
-	CleanupFrequency      time.Duration
+	PollingFrequency    time.Duration
+	BatchSize           int
+	PollingErrorLimit   int
+	PollingLimitPerHost int
+	CleanupFrequency    time.Duration
 
 	// Server
 	ServerPort string
@@ -43,6 +44,7 @@ func InitOptions() {
 		DBPassword:          getEnv("DB_PASSWORD", ""),
 		DBName:              getEnv("DB_NAME", "newsy"),
 		PythonBackendURL:    getEnv("PYTHON_BACKEND_URL", "http://localhost:8765"),
+		InternalAPIKey:      getEnv("INTERNAL_API_KEY", ""),
 		WorkerPoolSize:      getEnvInt("WORKER_POOL_SIZE", 16),
 		PollingFrequency:    getEnvDuration("POLLING_FREQUENCY", "5m"),
 		BatchSize:           getEnvInt("BATCH_SIZE", 100),

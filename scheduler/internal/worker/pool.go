@@ -18,7 +18,7 @@ func (p *Pool) Push(jobs model.JobList) {
 }
 
 // NewPool creates a pool of background workers
-func NewPool(store *storage.Storage, nbWorkers int, pythonBackendURL string) *Pool {
+func NewPool(store *storage.Storage, nbWorkers int, pythonBackendURL, internalAPIKey string) *Pool {
 	workerPool := &Pool{
 		queue: make(chan model.Job),
 	}
@@ -28,6 +28,7 @@ func NewPool(store *storage.Storage, nbWorkers int, pythonBackendURL string) *Po
 			id:               i,
 			store:            store,
 			pythonBackendURL: pythonBackendURL,
+			internalAPIKey:   internalAPIKey,
 		}
 		go worker.Run(workerPool.queue)
 	}

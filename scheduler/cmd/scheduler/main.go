@@ -34,7 +34,7 @@ func main() {
 	}
 
 	// Create worker pool
-	pool := worker.NewPool(store, config.Opts.WorkerPoolSize, config.Opts.PythonBackendURL)
+	pool := worker.NewPool(store, config.Opts.WorkerPoolSize, config.Opts.PythonBackendURL, config.Opts.InternalAPIKey)
 	slog.Info("Worker pool created",
 		slog.Int("worker_count", config.Opts.WorkerPoolSize),
 		slog.String("python_backend_url", config.Opts.PythonBackendURL),
