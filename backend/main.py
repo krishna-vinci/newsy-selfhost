@@ -2563,6 +2563,24 @@ async def add_feed(request: Request):
                     "articles_added": articles_added,
                 }
             )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 403:
+                raise
+
+            # Keep the feed after a source blocks only the initial import. The
+            # scheduler can retry it later, and the client can show an accurate
+            # non-fatal status instead of reporting the add operation as failed.
+            cache.invalidate_feeds_cache(user["id"])
+            return JSONResponse(
+                {
+                    "message": "Feed added but initial fetch was blocked",
+                    "category": category_name,
+                    "url": url,
+                    "feed_id": feed_id,
+                    "articles_added": 0,
+                    "fetch_blocked": True,
+                }
+            )
         except Exception as e:
             logging.exception("Error during initial feed fetch: %s", str(e))
             return JSONResponse(

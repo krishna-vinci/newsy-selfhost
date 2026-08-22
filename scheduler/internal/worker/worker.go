@@ -18,6 +18,7 @@ type worker struct {
 	id               int
 	store            *storage.Storage
 	pythonBackendURL string
+	internalAPIKey   string
 }
 
 // ProcessFeedRequest is the request payload sent to Python backend
@@ -34,11 +35,11 @@ type ProcessFeedRequest struct {
 
 // ProcessFeedResponse is the response from Python backend
 type ProcessFeedResponse struct {
-	Success      bool   `json:"success"`
-	ArticlesAdded int   `json:"articles_added"`
-	NewETag      string `json:"new_etag"`
+	Success         bool   `json:"success"`
+	ArticlesAdded   int    `json:"articles_added"`
+	NewETag         string `json:"new_etag"`
 	NewLastModified string `json:"new_last_modified"`
-	Error        string `json:"error,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 // Run waits for a job and processes the given feed
@@ -103,6 +104,9 @@ func (w *worker) processFeed(job model.Job) error {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if w.internalAPIKey != "" {
+		req.Header.Set("x-internal-api-key", w.internalAPIKey)
+	}
 
 	client := &http.Client{
 		Timeout: 10 * time.Minute, // Long timeout for feed processing
