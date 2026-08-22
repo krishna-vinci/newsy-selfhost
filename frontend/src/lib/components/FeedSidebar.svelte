@@ -326,10 +326,17 @@
 			const result = await response.json();
 			processingFeedId = result.feed_id || null;
 
-			toast.success(`Feed added! ${result.articles_added || 0} articles from last 10 days`, {
-				description: 'Articles are now available',
-				duration: 5000
-			});
+			if (result.fetch_blocked) {
+				toast.warning('Feed added — initial fetch blocked', {
+					description: 'The website blocks server-side access (403). Articles will appear once the scheduler retries.',
+					duration: 8000
+				});
+			} else {
+				toast.success(`Feed added! ${result.articles_added || 0} articles from last 10 days`, {
+					description: 'Articles are now available',
+					duration: 5000
+				});
+			}
 
 			resetAddFeedForm();
 

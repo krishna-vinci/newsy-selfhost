@@ -324,12 +324,18 @@
 			}
 
 			markFeedAdded(targetUrl);
-			toast.success(`Added ${feedName}`, {
-				description:
-					payload.articles_added != null
-						? `${payload.articles_added} recent article${payload.articles_added === 1 ? '' : 's'} imported`
-						: 'The feed is now in your library'
-			});
+			if (payload.fetch_blocked) {
+				toast.warning(`Added ${feedName} — fetch blocked`, {
+					description: 'The website blocks server-side access (403). Articles will appear once the scheduler retries.'
+				});
+			} else {
+				toast.success(`Added ${feedName}`, {
+					description:
+						payload.articles_added != null
+							? `${payload.articles_added} recent article${payload.articles_added === 1 ? '' : 's'} imported`
+							: 'The feed is now in your library'
+				});
+			}
 			resetAddDialog();
 			await onfeedadded();
 		} catch (error) {
