@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 import httpx
 
-from backend import database
+from backend import database, notification_templates
 from backend.auth import require_request_user
 from backend.config import Config
 
@@ -65,6 +65,21 @@ def sanitize_text(text: Optional[str]) -> str:
         return ""
     sanitized = text.replace("\n", " ").replace("\r", "")
     return " ".join(sanitized.split())
+
+
+def sanitize_multiline(text: Optional[str]) -> str:
+    """Collapse whitespace within lines but keep line breaks (in-app bodies)."""
+    if not text:
+        return ""
+    lines = [" ".join(line.split()) for line in text.replace("\r", "").split("\n")]
+    return "\n".join(line for line in lines if line)
+
+
+def truncate_multiline(text: Optional[str], max_length: int = 500) -> str:
+    cleaned = sanitize_multiline(text)
+    if len(cleaned) <= max_length:
+        return cleaned
+    return f"{cleaned[: max_length - 3].rstrip()}..."
 
 
 def truncate_text(text: Optional[str], max_length: int = 220) -> str:
@@ -155,7 +170,7 @@ async def record_in_app_notification(
             article_id,
             kind,
             sanitize_text(title),
-            truncate_text(body, 500),
+            truncate_multiline(body, 500),
             link,
         )
     finally:
@@ -163,64 +178,109 @@ async def record_in_app_notification(
 
 
 async def _send_telegram_message(
-    chat_id: str, title: str, body: str, link: Optional[str]
+    chat_id: str,
+    title: str,
+    body: str,
+    link: Optional[str],
+    *,
+    articles: Optional[list[dict[str, Any]]] = None,
+    footer: Optional[str] = None,
+    published_label: Optional[str] = None,
+    thumbnail_url: Optional[str] = None,
+    button_text: str = "Open article",
 ) -> bool:
     bot_token = Config.TELEGRAM_BOT_TOKEN
     if not bot_token:
         logger.warning("TELEGRAM_BOT_TOKEN not configured")
         return False
 
-    def escape_markdown(text: str) -> str:
-        special_chars = [
-            "_",
-            "*",
-            "[",
-            "]",
-            "(",
-            ")",
-            "~",
-            "`",
-            ">",
-            "#",
-            "+",
-            "-",
-            "=",
-            "|",
-            "{",
-            "}",
-            ".",
-            "!",
-        ]
-        escaped = text
-        for char in special_chars:
-            escaped = escaped.replace(char, f"\\{char}")
-        return escaped
+    resolved = notification_templates.resolve_telegram_payload(
+        title,
+        body,
+        link,
+        articles=articles,
+        footer=footer,
+        published_label=published_label,
+        thumbnail_url=thumbnail_url,
+        button_text=button_text,
+    )
 
-    escaped_title = escape_markdown(sanitize_text(title))
-    escaped_body = escape_markdown(truncate_text(body, 600))
-    message = f"*{escaped_title}*\n\n{escaped_body}"
-    if link:
-        message += f"\n\n[Open article]({link})"
+    reply_markup = None
+    if resolved["button_url"]:
+        reply_markup = json.dumps(
+            {
+                "inline_keyboard": [
+                    [{"text": button_text, "url": resolved["button_url"]}]
+                ]
+            }
+        )
 
-    telegram_api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": "MarkdownV2",
-        "disable_web_page_preview": False,
-    }
+    base_url = f"https://api.telegram.org/bot{bot_token}"
+    disable_preview = bool(articles)
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(telegram_api_url, json=payload)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        if resolved["as_photo"]:
+            photo_payload = {
+                "chat_id": chat_id,
+                "photo": resolved["thumbnail_url"],
+                "caption": resolved["text"],
+                "parse_mode": "HTML",
+            }
+            if reply_markup:
+                photo_payload["reply_markup"] = reply_markup
+            try:
+                response = await client.post(
+                    f"{base_url}/sendPhoto", json=photo_payload
+                )
+                response.raise_for_status()
+                return True
+            except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "Telegram sendPhoto failed, falling back to text: %s",
+                    exc.response.text,
+                )
+            except Exception as exc:  # pragma: no cover - network dependent
+                logger.warning("Telegram sendPhoto failed: %s", exc)
+
+        message_payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": resolved["text"],
+            "parse_mode": "HTML",
+            "disable_web_page_preview": disable_preview,
+        }
+        if reply_markup:
+            message_payload["reply_markup"] = reply_markup
+
+        try:
+            response = await client.post(
+                f"{base_url}/sendMessage", json=message_payload
+            )
             response.raise_for_status()
-        return True
-    except httpx.HTTPStatusError as exc:
-        logger.error("Failed to send Telegram notification: %s", exc.response.text)
-    except (
-        Exception
-    ) as exc:  # pragma: no cover - network errors are environment-dependent
-        logger.error("Failed to send Telegram notification: %s", exc)
+            return True
+        except httpx.HTTPStatusError as exc:
+            logger.error("Failed to send Telegram notification: %s", exc.response.text)
+            if exc.response.status_code == 400:
+                # Formatting was rejected (bad entities, stale photo, …) —
+                # retry once as plain text so the alert is not lost.
+                plain_payload: dict[str, Any] = {
+                    "chat_id": chat_id,
+                    "text": notification_templates.telegram_html_to_plain(
+                        resolved["text"]
+                    )[: notification_templates.TELEGRAM_MESSAGE_LIMIT],
+                    "disable_web_page_preview": True,
+                }
+                if reply_markup:
+                    plain_payload["reply_markup"] = reply_markup
+                try:
+                    response = await client.post(
+                        f"{base_url}/sendMessage", json=plain_payload
+                    )
+                    response.raise_for_status()
+                    return True
+                except Exception as retry_exc:
+                    logger.error("Plain-text Telegram retry failed: %s", retry_exc)
+        except Exception as exc:  # pragma: no cover - network errors are environment-dependent
+            logger.error("Failed to send Telegram notification: %s", exc)
     return False
 
 
@@ -230,6 +290,12 @@ async def send_telegram_notification(
     title: str,
     body: Optional[str],
     link: Optional[str],
+    *,
+    articles: Optional[list[dict[str, Any]]] = None,
+    footer: Optional[str] = None,
+    published_label: Optional[str] = None,
+    thumbnail_url: Optional[str] = None,
+    button_text: str = "Open article",
 ) -> bool:
     conn = await database.get_db_connection()
     try:
@@ -253,7 +319,17 @@ async def send_telegram_notification(
         await database.release_db_connection(conn)
 
     telegram_link = build_app_link(link, require_absolute=True) if link else None
-    return await _send_telegram_message(chat_id, title, body or "", telegram_link)
+    return await _send_telegram_message(
+        chat_id,
+        title,
+        body or "",
+        telegram_link,
+        articles=articles,
+        footer=footer,
+        published_label=published_label,
+        thumbnail_url=thumbnail_url,
+        button_text=button_text,
+    )
 
 
 async def send_web_push_notification(
@@ -352,6 +428,12 @@ async def deliver_notification(
     article_id: Optional[int] = None,
     kind: str = "article",
     push_tag: Optional[str] = None,
+    push_body: Optional[str] = None,
+    articles: Optional[list[dict[str, Any]]] = None,
+    footer: Optional[str] = None,
+    published_label: Optional[str] = None,
+    thumbnail_url: Optional[str] = None,
+    button_text: str = "Open article",
 ) -> None:
     await record_in_app_notification(
         user_id,
@@ -362,9 +444,20 @@ async def deliver_notification(
         kind=kind,
     )
     await send_web_push_notification(
-        user_id, category_id, title, body, link, tag=push_tag
+        user_id, category_id, title, push_body or body, link, tag=push_tag
     )
-    await send_telegram_notification(user_id, category_id, title, body, link)
+    await send_telegram_notification(
+        user_id,
+        category_id,
+        title,
+        body,
+        link,
+        articles=articles,
+        footer=footer,
+        published_label=published_label,
+        thumbnail_url=thumbnail_url,
+        button_text=button_text,
+    )
 
 
 async def get_notification_preferences(user_id: int) -> dict[str, Any]:
@@ -533,6 +626,72 @@ async def send_test_telegram_notification(request: Request):
             detail="Telegram is not ready yet. Start the bot, save your chat ID, and try again.",
         )
     return JSONResponse({"message": "Test notification sent"})
+
+
+@router.post("/telegram/sample")
+async def send_sample_telegram_notification(request: Request):
+    """
+    Send a demo of each notification style (batch, filter match, system).
+
+    Messages are delivered only when the user has Telegram configured, but
+    every style's rendered previews are always returned so the formats can
+    be inspected without any delivery.
+    """
+    user = require_request_user(request)
+
+    samples = notification_templates.build_sample_payloads(
+        build_app_link("/feeds", require_absolute=True)
+    )
+
+    rendered: dict[str, dict[str, Any]] = {}
+    for style, payload in samples.items():
+        resolved = notification_templates.resolve_telegram_payload(
+            payload["title"],
+            payload["body"],
+            payload.get("app_link"),
+            articles=payload.get("telegram", {}).get("articles"),
+            published_label=payload.get("telegram", {}).get("published_label"),
+            thumbnail_url=payload.get("telegram", {}).get("thumbnail_url"),
+            button_text=payload.get("telegram", {}).get(
+                "button_text", "Open article"
+            ),
+        )
+        rendered[style] = {
+            "title": payload["title"],
+            "in_app_body": payload["body"],
+            "push_body": payload.get("push_body") or payload["body"],
+            "telegram": resolved,
+        }
+
+    conn = await database.get_db_connection()
+    try:
+        integration = await get_user_integration(conn, user["id"], "telegram")
+    finally:
+        await database.release_db_connection(conn)
+
+    chat_id = ((integration or {}).get("config") or {}).get("chat_id")
+    delivered = False
+    if (
+        integration
+        and integration["is_enabled"]
+        and chat_id
+        and Config.TELEGRAM_BOT_TOKEN
+    ):
+        for payload in samples.values():
+            telegram = payload.get("telegram", {})
+            if await _send_telegram_message(
+                chat_id,
+                payload["title"],
+                payload["body"],
+                payload.get("app_link"),
+                articles=telegram.get("articles"),
+                published_label=telegram.get("published_label"),
+                thumbnail_url=telegram.get("thumbnail_url"),
+                button_text=telegram.get("button_text", "Open article"),
+            ):
+                delivered = True
+
+    return JSONResponse(jsonable_encoder({"sent": delivered, "styles": rendered}))
 
 
 @router.post("/push/subscribe")

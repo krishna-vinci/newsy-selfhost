@@ -168,6 +168,7 @@
 	let telegramChatId = $state('');
 	let isSavingTelegramPreferences = $state(false);
 	let isSendingTelegramTest = $state(false);
+	let isSendingTelegramSample = $state(false);
 	let isUpdatingBrowserPush = $state(false);
 	let browserPushSupportMessage = $state<string | null>(null);
 	let externalApiConfig = $state<ExternalApiConfig | null>(null);
@@ -1013,6 +1014,29 @@
 			toast.error(error instanceof Error ? error.message : 'Failed to disable browser push');
 		} finally {
 			isUpdatingBrowserPush = false;
+		}
+	}
+
+	async function sendTelegramSample() {
+		if (!notificationPreferences.telegram.configured) {
+			toast.error('Save your Telegram chat ID first');
+			return;
+		}
+
+		isSendingTelegramSample = true;
+		try {
+			const response = await fetch('/api/notifications/telegram/sample', {
+				method: 'POST'
+			});
+			if (!response.ok) {
+				const error = await response.json().catch(() => null);
+				throw new Error(error?.detail || 'Failed to send Telegram sample');
+			}
+			toast.success('Sample batch, filter, and system alerts sent to Telegram');
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Failed to send Telegram sample');
+		} finally {
+			isSendingTelegramSample = false;
 		}
 	}
 
@@ -2299,6 +2323,17 @@
 												<Loader2 class="mr-2 h-4 w-4 animate-spin" />
 											{/if}
 											Send test
+										</Button>
+										<Button
+											variant="outline"
+											onclick={sendTelegramSample}
+											disabled={isSendingTelegramSample ||
+												!notificationPreferences.telegram.configured}
+										>
+											{#if isSendingTelegramSample}
+												<Loader2 class="mr-2 h-4 w-4 animate-spin" />
+											{/if}
+											Send sample
 										</Button>
 									</div>
 								</div>

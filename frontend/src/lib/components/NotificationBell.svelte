@@ -193,7 +193,7 @@
 								</div>
 							</div>
 							{#if item.body}
-								<p class="line-clamp-4 text-sm text-muted-foreground">{item.body}</p>
+								<p class="line-clamp-4 whitespace-pre-line text-sm text-muted-foreground">{item.body}</p>
 							{/if}
 						</button>
 					{/each}

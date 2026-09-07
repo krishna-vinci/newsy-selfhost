@@ -19,6 +19,7 @@ import asyncio
 
 from backend.config import Config
 from backend import database, ai_filter, keyword_filter, cache, notifications
+from backend.notification_templates import compose_batch_alert
 from backend.feed_ingestion import POLL_ENTRY_SCAN_LIMIT, get_entry_timestamp
 from backend.youtube_embed import convert_links_to_embeds
 
@@ -371,6 +372,8 @@ async def parse_and_store_rss_feed(
                         "link": link,
                         "description": description,
                         "thumbnail": thumbnail_url,
+                        "published": published_formatted,
+                        "published_dt": pub_dt,
                     }
                 )
 
@@ -406,19 +409,25 @@ async def parse_and_store_rss_feed(
             # Send batched notifications after processing all articles
             if new_articles:
                 try:
-                    # Send single consolidated notification
-                    batch_title = f"{source_name}: {len(new_articles)} new article{'s' if len(new_articles) > 1 else ''}"
-                    batch_description = f"Latest: {new_articles[0]['title']}"
+                    # Single consolidated notification per feed poll
                     batch_link = f"/feeds?category={quote(category)}"
+                    composed = compose_batch_alert(
+                        source_name, new_articles, batch_link
+                    )
 
                     await notifications.deliver_notification(
                         user_id,
                         category_id,
-                        batch_title,
-                        batch_description,
+                        composed["title"],
+                        composed["body"],
                         batch_link,
                         kind="article_batch",
                         push_tag=f"batch-{feed_id}",
+                        push_body=composed["push_body"],
+                        articles=composed["telegram"]["articles"],
+                        published_label=composed["telegram"]["published_label"],
+                        thumbnail_url=composed["telegram"]["thumbnail_url"],
+                        button_text=composed["telegram"]["button_text"],
                     )
                     logger.info(
                         f"Sent batched notification for {len(new_articles)} articles from {source_name}"

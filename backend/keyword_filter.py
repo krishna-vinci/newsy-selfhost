@@ -12,6 +12,7 @@ import asyncpg
 
 from backend.ai_filter import filter_article
 from backend import database, notifications
+from backend.notification_templates import compose_filter_match
 
 logger = logging.getLogger(__name__)
 
@@ -290,15 +291,19 @@ async def send_filter_notification(
         else:
             clean_content = description
 
+        composed = compose_filter_match(
+            title, filter_names, clean_content, source, link
+        )
         await notifications.deliver_notification(
             user_id,
             category_id,
-            f"🎯 {title}",
-            f"Matched filters: {filter_names}\n\n{clean_content}\n\nSource: {source}",
+            composed["title"],
+            composed["body"],
             link,
             article_id=article_id,
             kind="filter_match",
             push_tag=f"filter-{article_id}",
+            button_text=composed["telegram"]["button_text"],
         )
         logger.info(f"Sent filter notification for article: {title[:50]}...")
 
